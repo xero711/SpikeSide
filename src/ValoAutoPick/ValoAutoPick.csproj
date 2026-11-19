@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\SpikeSide.ico</ApplicationIcon>
+    <AssemblyName>SpikeSide</AssemblyName>
+    <RootNamespace>ValoAutoPick</RootNamespace>
+    <Version>1.0.0</Version>
+    <Product>SpikeSide</Product>
+    <AssemblyTitle>SpikeSide</AssemblyTitle>
+    <Description>SpikeSide</Description>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TrialBuild)' == 'true'">
+    <DefineConstants>$(DefineConstants);TRIAL</DefineConstants>
+    <AssemblyName>SpikeSide-Trial</AssemblyName>
+    <AssemblyTitle>SpikeSide 体験版</AssemblyTitle>
+    <Description>SpikeSide 体験版</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="agents.json" />
+    <EmbeddedResource Include="Assets/SpikeSide.ico" LogicalName="ValoAutoPick.Assets.SpikeSide.ico" />
+    <EmbeddedResource Include="Assets/Maps/*.jpg" LogicalName="ValoAutoPick.Assets.Maps.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/Agents/*.png" LogicalName="ValoAutoPick.Assets.Agents.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/Agents/*.jpg" LogicalName="ValoAutoPick.Assets.Agents.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/Ranks/*.png" LogicalName="ValoAutoPick.Assets.Ranks.%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+dist/
+artifacts/
+*.apk
+analysis/api-reference/
+analysis/bundle-strings.txt
+analysis/app.config.json
+
+**/.vs/
+.claude/
+*.csproj.user
