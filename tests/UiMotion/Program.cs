@@ -43,6 +43,11 @@ internal static class Program
             {
                 await Task.Delay(100);
                 var assembly = typeof(MatchMapPanel).Assembly;
+                foreach (var name in new[] { "WebView2-LICENSE.txt", "ProtectedData-LICENSE.txt", "ProtectedData-THIRD-PARTY-NOTICES.txt", "DOTNET-LICENSE.txt", "DOTNET-THIRD-PARTY-NOTICES.txt", "WindowsDesktop-LICENSE.txt" })
+                {
+                    using var notice = assembly.GetManifestResourceStream($"ValoAutoPick.Licenses.{name}");
+                    Assert(notice != null && notice.Length > 0, $"license notice embedded: {name}");
+                }
                 using (var artworkResource = assembly.GetManifestResourceStream("ValoAutoPick.Assets.SpikeSide.png"))
                 {
                     Assert(artworkResource != null, "high resolution logo is embedded");

@@ -10,7 +10,7 @@
     <ApplicationIcon>Assets\SpikeSide.ico</ApplicationIcon>
     <AssemblyName>SpikeSide</AssemblyName>
     <RootNamespace>ValoAutoPick</RootNamespace>
-    <Version>1.0.1</Version>
+    <Version>1.0.0</Version>
     <Product>SpikeSide</Product>
     <AssemblyTitle>SpikeSide</AssemblyTitle>
     <Description>SpikeSide</Description>
@@ -25,6 +25,7 @@
     <EmbeddedResource Include="agents.json" />
     <EmbeddedResource Include="Assets/SpikeSide.ico" LogicalName="ValoAutoPick.Assets.SpikeSide.ico" />
     <EmbeddedResource Include="Assets/SpikeSide.png" LogicalName="ValoAutoPick.Assets.SpikeSide.png" />
+    <EmbeddedResource Include="Assets/Licenses/*.txt" LogicalName="ValoAutoPick.Licenses.%(Filename)%(Extension)" />
     <EmbeddedResource Include="Assets/Maps/*.jpg" LogicalName="ValoAutoPick.Assets.Maps.%(Filename)%(Extension)" />
     <EmbeddedResource Include="Assets/Agents/*.png" LogicalName="ValoAutoPick.Assets.Agents.%(Filename)%(Extension)" />
     <EmbeddedResource Include="Assets/Agents/*.jpg" LogicalName="ValoAutoPick.Assets.Agents.%(Filename)%(Extension)" />
