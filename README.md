@@ -8,4 +8,4 @@ GitHub ReleasesからWindows x64版のZIPをダウンロードして展開し、
 
 ## ビルド
 
-Windows上で.NET 9 SDKを使用します。PowerShellで `./build.ps1` を実行すると、チェック後に通常版のZIPを`dist`へ作成します。`./build-trial.ps1`は体験版を作成します。
+Windows上で.NET 9 SDKを使用します。PowerShellで `./build.ps1` を実行すると、チェック後にZIPを`dist`へ作成します。
