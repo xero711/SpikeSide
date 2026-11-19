@@ -275,7 +275,7 @@ public sealed class MainWindow : DarkForm
         brand.Paint += (_, e) =>
         {
             var size = UiMetrics.Px(brand, 40);
-            if (Icon != null) e.Graphics.DrawIcon(Icon, new Rectangle(0, UiMetrics.Px(brand, 1), size, size));
+            AppIcon.Draw(e.Graphics, new Rectangle(0, UiMetrics.Px(brand, 1), size, size));
         };
         brand.Controls.Add(new Label { Text = Edition.IsTrial ? "SpikeSide 体験版" : "SpikeSide", ForeColor = Theme.Text, Font = new Font("Segoe UI", 18, FontStyle.Bold), AutoSize = true, Location = new Point(49, 2) });
         var loginBar = new FlowLayoutPanel { Anchor = AnchorStyles.Top | AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(0, 4, 0, 0), Margin = Padding.Empty };

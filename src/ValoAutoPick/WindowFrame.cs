@@ -100,11 +100,8 @@ internal sealed class WindowCaption : Panel
         int S(int value) => UiMetrics.Px(this, value);
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        if (owner.Icon != null)
-        {
-            var size = S(23);
-            g.DrawIcon(owner.Icon, new Rectangle(S(8), (Height - size) / 2, size, size));
-        }
+        var size = S(23);
+        AppIcon.Draw(g, new Rectangle(S(8), (Height - size) / 2, size, size));
         TextRenderer.DrawText(g, "SpikeSide", brandFont, new Rectangle(S(35), 0, S(160), Height), Theme.Text,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
         using (var divider = new Pen(Theme.Border)) g.DrawLine(divider, S(196), S(12), S(196), Height - S(12));

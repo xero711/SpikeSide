@@ -362,14 +362,11 @@ internal sealed class SkeletonScreen : SkeletonSurface
 /// </summary>
 internal sealed class SharpImageBox : SkeletonSurface
 {
-    private const int FadeDuration = 145;
     private Image? image;
     private Bitmap? frame;
     private Rectangle frameSource;
     private ImageFit fit = ImageFit.Contain;
     private string placeholderText = "";
-    private System.Windows.Forms.Timer? fadeTimer;
-    private long fadeStart;
 
     public SharpImageBox()
     {
@@ -407,10 +404,6 @@ internal sealed class SharpImageBox : SkeletonSurface
             ResetFrame();
             previous?.Dispose();
             if (image is not null) Loading = false;
-            if (image is not null && Visible && IsHandleCreated && System.Windows.SystemParameters.ClientAreaAnimation)
-                StartFade();
-            else
-                fadeTimer?.Stop();
             Invalidate();
         }
     }
@@ -446,48 +439,14 @@ internal sealed class SharpImageBox : SkeletonSurface
         e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
         e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
         e.Graphics.CompositingMode = CompositingMode.SourceOver;
-        var progress = fadeTimer?.Enabled == true
-            ? Math.Clamp((Environment.TickCount64 - fadeStart) / (float)FadeDuration, 0f, 1f)
-            : 1f;
-        if (progress < 1f)
-        {
-            using var transparency = new ImageAttributes();
-            transparency.SetColorMatrix(new ColorMatrix { Matrix33 = 1f - (1f - progress) * (1f - progress) });
-            e.Graphics.DrawImage(frame, destination, 0, 0, frame.Width, frame.Height, GraphicsUnit.Pixel, transparency);
-        }
-        else
-            e.Graphics.DrawImage(frame, destination, 0, 0, frame.Width, frame.Height, GraphicsUnit.Pixel);
+        e.Graphics.DrawImage(frame, destination, 0, 0, frame.Width, frame.Height, GraphicsUnit.Pixel);
         e.Graphics.Restore(state);
-    }
-
-    private void StartFade()
-    {
-        if (fadeTimer is null)
-        {
-            fadeTimer = new System.Windows.Forms.Timer { Interval = 16 };
-            fadeTimer.Tick += (_, _) =>
-            {
-                if (Environment.TickCount64 - fadeStart >= FadeDuration)
-                    fadeTimer.Stop();
-                Invalidate();
-            };
-        }
-        fadeStart = Environment.TickCount64;
-        fadeTimer.Start();
-    }
-
-    protected override void OnVisibleChanged(EventArgs e)
-    {
-        if (!Visible) fadeTimer?.Stop();
-        base.OnVisibleChanged(e);
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
-            fadeTimer?.Dispose();
-            fadeTimer = null;
             ResetFrame();
             image?.Dispose();
             image = null;

@@ -30,7 +30,7 @@ internal sealed class CatalogClient : IDisposable
             PooledConnectionLifetime = TimeSpan.FromMinutes(10)
         };
         http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(25) };
-        http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SpikeSide", "1.0.0"));
+        http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SpikeSide", typeof(CatalogClient).Assembly.GetName().Version!.ToString(3)));
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
     }
 

@@ -43,6 +43,13 @@ internal static class Program
             {
                 await Task.Delay(100);
                 var assembly = typeof(MatchMapPanel).Assembly;
+                using (var artworkResource = assembly.GetManifestResourceStream("ValoAutoPick.Assets.SpikeSide.png"))
+                {
+                    Assert(artworkResource != null, "high resolution logo is embedded");
+                    using var artwork = new Bitmap(artworkResource!);
+                    Assert(artwork.Width >= 512 && artwork.Height >= 512, "header logo uses high resolution source");
+                    Assert(artwork.GetPixel(0, 0).A == 0, "header logo background is transparent");
+                }
                 foreach (var (key, _) in MapCatalog.Maps)
                 {
                     using var asset = assembly.GetManifestResourceStream($"ValoAutoPick.Assets.Maps.{key}.jpg");
@@ -66,12 +73,41 @@ internal static class Program
                 using (var picker = new AgentPickerDialog(Array.Empty<Agent>(), null))
                 using (var pickerBitmap = picker.Icon!.ToBitmap())
                 {
+                    Assert(expectedBitmap.GetPixel(0, 0).A == 0, "application icon has a transparent corner");
                     Assert(expectedBitmap.Size == pickerBitmap.Size && expectedBitmap.Size == actualBitmap.Size, "dialog icon size matches app icon");
                     for (int y = 0; y < expectedBitmap.Height; y++)
                         for (int x = 0; x < expectedBitmap.Width; x++)
                             if (expectedBitmap.GetPixel(x,y).ToArgb() != pickerBitmap.GetPixel(x,y).ToArgb() || expectedBitmap.GetPixel(x,y).ToArgb() != actualBitmap.GetPixel(x,y).ToArgb())
                                 throw new InvalidOperationException("dialog icon differs from app icon");
                     Console.WriteLine("PASS agent picker uses app icon");
+                }
+                var imageType = assembly.GetType("ValoAutoPick.SharpImageBox")!;
+                using (var imageBox = (Control)Activator.CreateInstance(imageType, true)!)
+                {
+                    imageBox.Size = new Size(120, 60);
+                    imageBox.BackColor = Color.FromArgb(22, 29, 40);
+                    form.Controls.Add(imageBox);
+                    imageBox.CreateControl();
+                    var sample = new Bitmap(120, 60, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    using (var graphics = Graphics.FromImage(sample))
+                    {
+                        graphics.Clear(Color.Transparent);
+                        using var brush = new SolidBrush(Color.FromArgb(180, 240, 30, 60));
+                        graphics.FillRectangle(brush, 10, 10, 100, 40);
+                    }
+                    imageType.GetProperty("Image")!.SetValue(imageBox, sample);
+                    using var first = new Bitmap(120, 60);
+                    imageBox.DrawToBitmap(first, imageBox.ClientRectangle);
+                    await Task.Delay(200);
+                    using var later = new Bitmap(120, 60);
+                    imageBox.DrawToBitmap(later, imageBox.ClientRectangle);
+                    Assert(first.GetPixel(60, 30).ToArgb() != imageBox.BackColor.ToArgb(), "weapon image is visible on its first frame");
+                    for (var y = 0; y < 60; y += 3)
+                        for (var x = 0; x < 120; x += 3)
+                            if (first.GetPixel(x, y).ToArgb() != later.GetPixel(x, y).ToArgb())
+                                throw new InvalidOperationException("weapon image changed after its first frame");
+                    Console.WriteLine("PASS weapon image remains stable after its first frame");
+                    form.Controls.Remove(imageBox);
                 }
                 using (var main = new MainWindow())
                 {
