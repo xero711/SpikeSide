@@ -21,6 +21,9 @@ internal static class Program
     private static void Main()
     {
         ApplicationConfiguration.Initialize();
+        var queueName = typeof(MatchHistoryControl).GetMethod("QueueName", BindingFlags.NonPublic | BindingFlags.Static)!;
+        Assert((string?)queueName.Invoke(null, ["ggteam"]) == "エスカレーション", "escalation queue uses its Japanese name");
+        Assert((string?)queueName.Invoke(null, ["premier"]) == "プレミア", "premier queue uses its Japanese name");
         using var form = new TestWindow { Text = "UI animation checks", ClientSize = new Size(850, 720), Opacity = 0, ShowInTaskbar = false };
         var panel = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, FlowDirection = FlowDirection.TopDown,
             BackColor = Color.FromArgb(22, 29, 40) };

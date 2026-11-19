@@ -1897,7 +1897,7 @@ public sealed class MatchHistoryControl : UserControl
         "competitive" => "コンペティティブ", "unrated" => "アンレート", "swiftplay" => "スイフトプレイ",
         "spikerush" => "スパイクラッシュ", "deathmatch" => "デスマッチ", "teamdeathmatch" or "hurm" => "チームデスマッチ",
         "skirmish" => "スカーミッシュ",
-        "escalation" => "エスカレーション", "replication" => "レプリケーション", "ggteam" => "プレミア",
+        "escalation" or "ggteam" => "エスカレーション", "replication" => "レプリケーション", "premier" => "プレミア",
         "custom" => "カスタム", "onefa" => "アビスドラフトアリーナ", _ => id.Length == 0 ? "モード不明" : id
     };
     private static string Number(double? value, int digits) => value is { } number && double.IsFinite(number) ? number.ToString($"F{digits}") : "—";
