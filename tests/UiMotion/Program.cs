@@ -482,7 +482,14 @@ internal static class Program
         var storeTab = (Control)typeof(StorePreviewControl).GetField("storeTab", flags)!.GetValue(store)!;
         var search = (Control)typeof(StorePreviewControl).GetField("searchBox", flags)!.GetValue(store)!;
         var actions = ((Control)typeof(StorePreviewControl).GetField("refreshCatalogButton", flags)!.GetValue(store)!).Parent!;
+        var status = (Label)typeof(StorePreviewControl).GetField("statusLabel", flags)!.GetValue(store)!;
+        const string otherProgress = "今日のショップを取得しています…";
+        typeof(StorePreviewControl).GetMethod("SetStatus", flags)!.Invoke(store, [otherProgress, false]);
         typeof(StorePreviewControl).GetMethod("ShowCatalogPage", flags)!.Invoke(store, null);
+        Assert(status.Text == otherProgress, "catalog loading does not replace another operation's status");
+        typeof(StorePreviewControl).GetMethod("EndProgress", flags)!.Invoke(store, [otherProgress]);
+        Assert(!status.Text.Contains("カタログを読み込んでいます", StringComparison.Ordinal) &&
+               !status.Text.Contains("カタログを更新しています", StringComparison.Ordinal), "catalog loading adds no top status message");
         var sawStacked = false;
         foreach (var width in new[] { 1400, 800, 500, 1400 })
         {

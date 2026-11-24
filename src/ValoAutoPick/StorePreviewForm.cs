@@ -896,9 +896,7 @@ public sealed class StorePreviewControl : UserControl
         if (IsDisposed) return Task.CompletedTask;
         if (loadingCatalog) return catalogLoadTask ?? Task.CompletedTask;
         loadingCatalog = true;
-        catalogLoadMessage = "武器カタログを読み込んでいます…";
         refreshCatalogButton.Enabled = false;
-        SetStatus(refresh ? "カタログを更新しています…" : "カタログを読み込んでいます…", false);
         if (!catalogLoaded) RenderCatalogGrid();
         catalogLoadTask = LoadCatalogCoreAsync(refresh);
         return catalogLoadTask;
@@ -935,7 +933,6 @@ public sealed class StorePreviewControl : UserControl
             loadingCatalog = false;
             if (!disposingStore && !IsDisposed && !Disposing)
             {
-                EndProgress(refresh ? "カタログを更新しています…" : "カタログを読み込んでいます…");
                 refreshCatalogButton.Enabled = true;
                 if (!catalogLoaded) RenderCatalogGrid();
             }
