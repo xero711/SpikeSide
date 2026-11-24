@@ -95,9 +95,9 @@ internal sealed class NotificationRelayDialog : DarkForm
         host = server; hostStop = new CancellationTokenSource(); hostApi = new RiotApi();
         hostStatus.Text = "Riot Clientへの接続を待っています。";
         hostTask = RiotLocalEvents.ListenAny(hostApi,
-            subject => { server.SetSubject(subject); SetHostStatus("通知を送信できます。画面を開いたままにしてください。"); },
+            subject => { if (!ReferenceEquals(host, server)) return; server.SetSubject(subject); SetHostStatus("通知を送信できます。画面を開いたままにしてください。"); },
             subject => server.Publish(subject),
-            () => { server.SetSubject(""); SetHostStatus("Riot Clientへの接続を待っています。"); }, hostStop.Token);
+            () => { if (!ReferenceEquals(host, server)) return; server.SetSubject(""); SetHostStatus("Riot Clientへの接続を待っています。"); }, hostStop.Token);
     }
 
     private void StopHost()

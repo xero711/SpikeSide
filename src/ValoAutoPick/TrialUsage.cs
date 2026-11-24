@@ -15,19 +15,24 @@ public sealed class TrialUsage
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("QuickPickerPro.TrialUsage.v2");
     private readonly string legacyPath;
     private readonly ITrialStore[] stores;
+    private readonly bool allowReadOnlyMachine;
+    private readonly string fallbackLockPath;
 
     public static string DefaultPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "QuickPickerPro", "trial-v1.json");
 
     // Isolated stores allow tests to exercise the real reconciliation code
     // without modifying the user's actual trial allowance or registry.
-    public TrialUsage(string path) : this(path, [new FileStore(path + ".machine"), new FileStore(path + ".user"), new FileStore(path + ".registry")]) { }
-    private TrialUsage(string path, ITrialStore[] stores) { legacyPath = path; this.stores = stores; }
+    public TrialUsage(string path) : this(path, [new FileStore(path + ".machine"), new FileStore(path + ".user"), new FileStore(path + ".registry")], false, path + ".lock") { }
+    internal TrialUsage(string path, bool readOnlyMachineFallback) : this(path,
+        [new FileStore(path + ".machine"), new FileStore(path + ".user"), new FileStore(path + ".registry")], readOnlyMachineFallback, path + ".lock") { }
+    private TrialUsage(string path, ITrialStore[] stores, bool allowReadOnlyMachine, string fallbackLockPath)
+    { legacyPath = path; this.stores = stores; this.allowReadOnlyMachine = allowReadOnlyMachine; this.fallbackLockPath = fallbackLockPath; }
     public static TrialUsage CreateDefault() => new(DefaultPath,
     [
         new FileStore(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "QuickPickerPro", "trial-v2.dat")),
         new FileStore(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuickPickerPro", "trial-v2.dat")),
         new RegistryStore()
-    ]);
+    ], true, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "QuickPickerPro", "trial.lock"));
 
     public int Remaining() => WithLockedHistory(null, false).remaining;
 
@@ -46,16 +51,32 @@ public sealed class TrialUsage
 
     private (bool allowed, int remaining) WithLockedHistory(string? matchHash, bool reserve)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(legacyPath)!);
-        FileStream legacy;
-        bool created;
-        try { legacy = new FileStream(legacyPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None); created = true; }
-        catch (IOException) when (File.Exists(legacyPath))
-        { legacy = new FileStream(legacyPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); created = false; }
+        FileStream? legacy = null;
+        FileStream? fallbackLock = null;
+        var created = false;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(legacyPath)!);
+            try { legacy = new FileStream(legacyPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None); created = true; }
+            catch (IOException) when (File.Exists(legacyPath))
+            { legacy = new FileStream(legacyPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+        }
+        catch (UnauthorizedAccessException) when (allowReadOnlyMachine)
+        {
+            // An administrator may have created the machine record. Keep its exclusive
+            // lock and reconcile its contents even if this user cannot update it.
+            if (File.Exists(legacyPath)) legacy = new FileStream(legacyPath, FileMode.Open, FileAccess.Read, FileShare.None);
+            else
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(fallbackLockPath)!);
+                fallbackLock = new FileStream(fallbackLockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+        }
+        using (fallbackLock)
         using (legacy)
         {
-            if (created) WriteLegacy(legacy, []);
-            var legacyData = ReadBytes(legacy);
+            if (created) WriteLegacy(legacy!, []);
+            var legacyData = legacy is null ? Encoding.UTF8.GetBytes("[]") : ReadBytes(legacy);
             var plaintextLegacy = legacyData.SkipWhile(x => x is 9 or 10 or 13 or 32).FirstOrDefault() == (byte)'[';
             var original = Parse(plaintextLegacy ? legacyData : ProtectedData.Unprotect(legacyData, Entropy, DataProtectionScope.LocalMachine));
             var copies = new List<string>?[stores.Length];
@@ -75,13 +96,15 @@ public sealed class TrialUsage
 
             // Commit before permitting a game request. Partial writes are merged on
             // the next run; a damaged or inaccessible copy fails closed.
-            if (plaintextLegacy || !original.ToHashSet(StringComparer.Ordinal).SetEquals(result)) WriteLegacy(legacy, result);
+            if (legacy?.CanWrite == true && (plaintextLegacy || !original.ToHashSet(StringComparer.Ordinal).SetEquals(result))) WriteLegacy(legacy, result);
             byte[]? protectedData = null;
             for (var i = 0; i < stores.Length; i++)
             {
                 if (copies[i] != null && copies[i]!.ToHashSet(StringComparer.Ordinal).SetEquals(result)) continue;
                 protectedData ??= ProtectedData.Protect(JsonSerializer.SerializeToUtf8Bytes(result), Entropy, DataProtectionScope.LocalMachine);
-                stores[i].Write(protectedData);
+                try { stores[i].Write(protectedData); }
+                catch (UnauthorizedAccessException) when (allowReadOnlyMachine && i == 0)
+                { /* Keep the readable machine replica; the user and registry replicas remain mandatory. */ }
             }
             return (allowed, Limit - result.Count);
         }
@@ -125,7 +148,7 @@ public sealed class TrialUsage
                 { file.Write(data); file.Flush(true); }
                 File.Move(temp, path, true);
             }
-            finally { if (File.Exists(temp)) File.Delete(temp); }
+            finally { try { File.Delete(temp); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { } }
         }
     }
     private sealed class RegistryStore : ITrialStore

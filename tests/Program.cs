@@ -29,6 +29,138 @@ var tests = new List<(string, Func<Task>)>();
 var now = DateTimeOffset.UtcNow;
 Settings Config() => new() { AgentId = "agent-a" };
 void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"Expected {expected}, got {actual}"); }
+tests.Add(("storefront accepts absent accessories and null offer arrays", () => {
+    const string payload = """{"SkinsPanelLayout":{"SingleItemStoreOffers":null,"SingleItemOffersRemainingDurationInSeconds":0},"AccessoryStore":null,"FeaturedBundle":{"Bundles":null,"BundleRemainingDurationInSeconds":0},"BonusStore":{"BonusStoreOffers":null,"BonusStoreRemainingDurationInSeconds":0}}""";
+    var parsed = StorefrontParser.Parse(payload);
+    Equal(0, parsed.DailySkins.Offers.Count); Equal(0, parsed.Accessories.Offers.Count);
+    Equal(0, parsed.FeaturedBundles.Bundles.Count); Equal(0, parsed.NightMarket!.Offers.Count);
+    var withAccessories = payload.Replace("\"AccessoryStore\":null", "\"AccessoryStore\":{\"AccessoryStoreOffers\":null,\"AccessoryStoreRemainingDurationInSeconds\":0}");
+    Equal(0, StorefrontParser.Parse(withAccessories).Accessories.Offers.Count);
+    return Task.CompletedTask;
+}));
+tests.Add(("log tail does not reuse stale startup state", () => {
+    var path = Path.GetTempFileName();
+    try {
+        File.WriteAllText(path, "LogGameFlowStateManager: Broadcasting state changed to MainMenu\n" + new string('x', 600000));
+        Equal<string?>(null, RiotApi.GameFlowStateFromLog(RiotApi.ReadTailShared(path, 512 * 1024)));
+        File.AppendAllText(path, "\nLogGameFlowStateManager: Broadcasting state changed to Pregame\n");
+        Equal("Pregame", RiotApi.GameFlowStateFromLog(RiotApi.ReadTailShared(path, 512 * 1024)));
+    } finally { File.Delete(path); }
+    return Task.CompletedTask;
+}));
+tests.Add(("match history requests an exclusive end index", async () => {
+    var transport = new Transport();
+    using var api = new RiotApi(transport);
+    await api.Login(new AuthResult("fake-access", "fake-id", now.AddHours(1)), "auto", default);
+    await api.GetMatchHistory(0, 10, default);
+    Equal("?startIndex=0&endIndex=10", transport.Calls[^1].Uri.Query);
+    await api.GetMatchHistory(10, 10, default);
+    Equal("?startIndex=10&endIndex=20", transport.Calls[^1].Uri.Query);
+    transport.HistoryResponse = """{"Total":11,"History":[{"MatchID":"bad","GameStartTime":1},{"MatchID":"22222222-2222-2222-2222-222222222222","GameStartTime":1}]}""";
+    var page = await api.GetMatchHistory(0, 10, default);
+    Equal(1, page.Entries.Count); Equal(2, page.RawCount); Equal<int?>(11, page.Total);
+}));
+tests.Add(("match history paging handles refresh, short pages and server totals", () => {
+    Equal((10, false), MatchHistoryPaging.Advance(0, true, true, 0, 10, 0, null));
+    Equal((10, false), MatchHistoryPaging.Advance(0, true, true, 0, 10, 9, null));
+    Equal((10, true), MatchHistoryPaging.Advance(0, true, true, 0, 10, 10, null));
+    Equal((20, false), MatchHistoryPaging.Advance(10, true, false, 10, 10, 7, null));
+    Equal((20, true), MatchHistoryPaging.Advance(10, true, false, 10, 10, 10, 21));
+    Equal((20, false), MatchHistoryPaging.Advance(10, true, false, 10, 10, 10, 20));
+    Equal((20, false), MatchHistoryPaging.Advance(20, false, true, 0, 10, 10, null));
+    return Task.CompletedTask;
+}));
+tests.Add(("trial reconciles read-only machine records and persists user replicas", () => {
+    var folder = Path.Combine(Path.GetTempPath(), "SpikeSide-trial-readonly-" + Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(folder, "usage.json");
+    try {
+        var initial = new TrialUsage(path, true);
+        Equal(true, initial.Reserve("first"));
+        File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+        File.SetAttributes(path + ".machine", File.GetAttributes(path + ".machine") | FileAttributes.ReadOnly);
+        var reopened = new TrialUsage(path, true);
+        Equal(2, reopened.Remaining());
+        Equal(true, reopened.Reserve("second"));
+        Equal(1, new TrialUsage(path, true).Remaining());
+        Equal(true, reopened.Reserve("third"));
+        Equal(false, reopened.Reserve("fourth"));
+    } finally {
+        if (File.Exists(path)) File.SetAttributes(path, FileAttributes.Normal);
+        if (File.Exists(path + ".machine")) File.SetAttributes(path + ".machine", FileAttributes.Normal);
+        if (Directory.Exists(folder)) Directory.Delete(folder, true);
+    }
+    return Task.CompletedTask;
+}));
+tests.Add(("archive skips malformed match alongside valid matches", () => {
+    var root = Path.Combine(Path.GetTempPath(), "SpikeSide-archive-" + Guid.NewGuid().ToString("N"));
+    var subject = Guid.NewGuid().ToString();
+    try {
+        var archive = new MatchHistoryArchive(root);
+        var match = MatchDetailsParser.Parse("""{"matchInfo":{"matchId":"valid"},"players":[],"teams":[],"roundResults":[]}""").Match!;
+        archive.Save(subject, [MatchAnalyticsEngine.Analyze(match)], new Dictionary<string,string>(), default);
+        var folder = Path.Combine(root, subject, "matches");
+        var path = Directory.GetFiles(folder, "*.json").Single();
+        var damaged = File.ReadAllText(path).Replace("\"Teams\":[]", "\"Teams\":null");
+        var damagedId = "broken";
+        var damagedName = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(damagedId.ToUpperInvariant()))) + ".json";
+        File.WriteAllText(Path.Combine(folder, damagedName), damaged.Replace("\"valid\"", "\"broken\""));
+        var loaded = archive.Load(subject, default);
+        Equal(1, loaded.Matches.Count); Equal(1, loaded.UnreadableCount);
+    } finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    return Task.CompletedTask;
+}));
+tests.Add(("theme settings default, normalize, and survive JSON round trip", () => {
+    Equal("dark", Storage.Parse("{}").Theme);
+    Equal("dark", Storage.Parse("{\"Theme\":\"invalid\"}").Theme);
+    var settings = Storage.Parse("{\"Theme\":\"LIGHT\",\"StartOnLaunch\":true}");
+    Equal("light", settings.Theme); Equal(true, settings.StartOnLaunch);
+    var restored = Storage.Parse(System.Text.Json.JsonSerializer.Serialize(settings));
+    Equal("light", restored.Theme); Equal(true, restored.StartOnLaunch);
+    return Task.CompletedTask;
+}));
+tests.Add(("round parsing merges duplicate kills and analyzes damage and first kills", () => {
+    const string json = """
+    {"matchInfo":{"matchId":"sample","queueID":"competitive"},
+     "players":[{"subject":"a","teamId":"Blue","stats":{"kills":1,"deaths":0,"roundsPlayed":2}},
+                {"subject":"b","teamId":"Red","stats":{"kills":0,"deaths":1,"roundsPlayed":2}}],
+     "teams":[{"teamId":"Blue","won":true},{"teamId":"Red","won":false}],
+     "kills":[{"round":0,"killer":"a","victim":"b","roundTime":120,"finishingDamage":{"damageItem":"weapon"}}],
+     "roundResults":[
+       {"roundNum":1,"playerStats":[{"subject":"a","damage":[]}]},
+       {"roundNum":0,"winningTeam":"Blue","playerStats":[
+         {"subject":"a","kills":[{"victim":"b","roundTime":120,"finishingDamage":{"damageItem":"weapon"}}],
+          "damage":[{"receiver":"b","damage":100,"headshots":1,"bodyshots":3,"legshots":0}]},
+         {"subject":"b"}],
+        "kills":[{"killer":"a","victim":"b","roundTime":120,"finishingDamage":{"damageItem":"weapon"}}]}
+     ]}
+    """;
+    var parsed = MatchDetailsParser.Parse(json).Match ?? throw new Exception("Match did not parse");
+    Equal(2, parsed.Rounds.Count); Equal<int?>(0, parsed.Rounds[0].RoundNum);
+    Equal(1, parsed.Rounds[0].Kills.Count); Equal(1, parsed.Rounds[0].Damage.Count);
+    var analysis = MatchAnalyticsEngine.Analyze(parsed);
+    Equal(true, analysis.HasKillTimeline); Equal("a", analysis.Rounds[0].FirstKiller);
+    var a = analysis.FindPlayer("a")!; var b = analysis.FindPlayer("b")!;
+    Equal<int?>(100, a.DamageDealt); Equal<int?>(100, b.DamageReceived);
+    Equal<int?>(1, a.FirstKills); Equal<int?>(1, b.FirstDeaths);
+    Equal(1, a.WeaponKills.Single().Kills);
+    var history = MatchAnalyticsEngine.AnalyzeHistory([analysis, analysis], "a", "competitive");
+    Equal(1, history.MatchCount); Equal(1, history.Wins); Equal<double?>(1, history.OverallKillDeathRatio);
+    Equal(0, MatchAnalyticsEngine.AnalyzeHistory([analysis], "a", "deathmatch").MatchCount);
+    return Task.CompletedTask;
+}));
+tests.Add(("local client region and version resolution preserve deployment, log and PBE fallbacks", () => {
+    using var game = System.Text.Json.JsonDocument.Parse("""{"version":"release-10.01","launchConfiguration":{"arguments":["-ares-deployment=latam"]}}""");
+    Equal(("latam", "na"), RiotApi.ResolveLocalRegion(game.RootElement, "auto", ""));
+    Equal(("eu", "eu"), RiotApi.ResolveLocalRegion(game.RootElement, "eu", ""));
+    Equal("release-10.01", RiotApi.ResolveLocalVersion(game.RootElement, "CI server version: release-old"));
+    using var fallback = System.Text.Json.JsonDocument.Parse("""{"version":"unknown","patchlineId":"pbe"}""");
+    using var noDeployment = System.Text.Json.JsonDocument.Parse("{}");
+    const string log = "https://glz-ap-1.ap.a.pvp.net CI server version: release-log";
+    Equal(("na", "pbe"), RiotApi.ResolveLocalRegion(fallback.RootElement, "auto", log));
+    Equal(("ap", "ap"), RiotApi.ResolveLocalRegion(noDeployment.RootElement, "auto", log));
+    Equal("release-log", RiotApi.ResolveLocalVersion(fallback.RootElement, log));
+    return Task.CompletedTask;
+}));
 tests.Add(("trial persists three distinct matches and denies a fourth after reopening", async () => {
     var folder = Path.Combine(Path.GetTempPath(), "QuickPickerTrialTest-" + Guid.NewGuid().ToString("N"));
     var path = Path.Combine(folder, "usage.json");
@@ -646,6 +778,16 @@ tests.Add(("persistent login uses an isolated non-private profile and silent aut
     Equal(false, firefox.ArgumentList.Contains("-private-window"));
     return Task.CompletedTask;
 }));
+tests.Add(("headless browser job stops its process when the owner closes", async () =>
+{
+    using var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ping.exe")
+    {
+        UseShellExecute = false, CreateNoWindow = true, ArgumentList = { "-n", "30", "127.0.0.1" }
+    }) ?? throw new Exception("Could not start test process");
+    using (var job = new BrowserProcessJob()) job.Add(child);
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+    await child.WaitForExitAsync(timeout.Token);
+}));
 tests.Add(("automatic refresh rejects a different account", async () =>
 {
     var transport = new Transport();
@@ -1118,7 +1260,7 @@ sealed class Transport : HttpMessageHandler
     public int GameStatus = 200;
     public bool PregameAvailable = true, CoregameAvailable;
     public string QueueEntryTime = "0001-01-01T00:00:00Z";
-    public string? PartyResponse, MatchResponse, OwnedAgentsResponse;
+    public string? PartyResponse, MatchResponse, OwnedAgentsResponse, HistoryResponse;
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
     {
         Calls.Add((req.RequestUri!, req.Method, req.Headers.Authorization?.ToString() ?? "", req.Headers.TryGetValues("X-Riot-Entitlements-JWT", out var headers) ? headers.Single() : ""));
@@ -1128,6 +1270,7 @@ sealed class Transport : HttpMessageHandler
             "entitlements.auth.riotgames.com" => """{"entitlements_token":"fake-entitlement"}""",
             "riot-geo.pas.si.riotgames.com" => """{"affinities":{"live":"br","pbe":"na"}}""",
             "valorant-api.com" => """{"data":{"riotClientVersion":"release-test"}}""",
+            _ when req.RequestUri.AbsolutePath.Contains("/match-history/v1/history/") => HistoryResponse ?? """{"History":[]}""",
             _ when req.RequestUri.AbsolutePath.Contains("/store/v1/entitlements/") => OwnedAgentsResponse ?? """{"Entitlements":[]}""",
             _ when req.RequestUri.AbsolutePath.Contains("/parties/v1/players/") => """{"CurrentPartyID":"44444444-4444-4444-4444-444444444444"}""",
             _ when req.RequestUri.AbsolutePath.EndsWith("/matchmaking/join") => """{"ID":"44444444-4444-4444-4444-444444444444"}""",

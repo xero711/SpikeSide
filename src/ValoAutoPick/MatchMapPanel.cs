@@ -6,7 +6,8 @@ namespace ValoAutoPick;
 // Map artwork is embedded so showing a match never depends on a network request.
 public sealed class MatchMapPanel : Panel
 {
-    private readonly Dictionary<string, Image?> images = new(StringComparer.OrdinalIgnoreCase);
+    private string? loadedMap;
+    private Image? image;
     private string mapId = "", agentName = "";
     public MatchMapPanel()
     {
@@ -19,6 +20,12 @@ public sealed class MatchMapPanel : Panel
     {
         id ??= ""; agent ??= "";
         if (id == mapId && agent == agentName) return;
+        if (!string.Equals(id, mapId, StringComparison.OrdinalIgnoreCase))
+        {
+            image?.Dispose();
+            image = null;
+            loadedMap = null;
+        }
         mapId = id; agentName = agent;
         AccessibleName = id.Length == 0 ? "現在のマップ: マッチを待機中" : $"現在のマップ: {MapCatalog.Name(id)}";
         Invalidate();
@@ -29,11 +36,14 @@ public sealed class MatchMapPanel : Panel
         // Only look up known embedded names, never paths supplied by the game.
         var known = MapCatalog.Maps.FirstOrDefault(m => m.Key.Equals(key, StringComparison.OrdinalIgnoreCase)).Key;
         if (string.IsNullOrEmpty(known)) return null;
-        if (images.TryGetValue(known, out var cached)) return cached;
+        if (string.Equals(loadedMap, known, StringComparison.OrdinalIgnoreCase)) return image;
+        image?.Dispose();
+        image = null;
+        loadedMap = known;
         using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream($"ValoAutoPick.Assets.Maps.{known}.jpg");
-        if (stream == null) return images[known] = null;
+        if (stream == null) return null;
         using var original = Image.FromStream(stream);
-        return images[known] = new Bitmap(original);
+        return image = new Bitmap(original);
     }
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -52,7 +62,7 @@ public sealed class MatchMapPanel : Panel
         }
         else
         {
-            using var fallback = new LinearGradientBrush(rect, Color.FromArgb(32, 52, 68), mapId.Length == 0 ? Color.FromArgb(27, 41, 55) : Theme.Background, 20f);
+            using var fallback = new LinearGradientBrush(rect, Color.FromArgb(32, 52, 68), mapId.Length == 0 ? Color.FromArgb(27, 41, 55) : Color.FromArgb(14, 19, 27), 20f);
             g.FillRectangle(fallback, rect);
             using var grid = new Pen(Color.FromArgb(22, 133, 212, 218), Math.Max(1, S(1)));
             for (var x = -Height; x < Width + Height; x += S(45)) g.DrawLine(grid, x, Height, x + Height, 0);
@@ -72,7 +82,7 @@ public sealed class MatchMapPanel : Panel
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) foreach (var image in images.Values) image?.Dispose();
+        if (disposing) { image?.Dispose(); image = null; RoundedCorners.Release(this); }
         base.Dispose(disposing);
     }
 }

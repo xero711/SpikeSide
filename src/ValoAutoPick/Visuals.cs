@@ -1,4 +1,4 @@
-﻿using System.Drawing.Drawing2D;
+using System.Drawing.Drawing2D;
 using System.Reflection;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -7,15 +7,35 @@ namespace ValoAutoPick;
 
 internal static class Theme
 {
-    public static readonly Color Background = Color.FromArgb(14, 19, 27);
-    public static readonly Color Surface = Color.FromArgb(22, 29, 40);
-    public static readonly Color Elevated = Color.FromArgb(31, 40, 53);
-    public static readonly Color Border = Color.FromArgb(46, 57, 72);
-    public static readonly Color Text = Color.FromArgb(244, 246, 250);
-    public static readonly Color Muted = Color.FromArgb(150, 164, 183);
-    public static readonly Color Red = Color.FromArgb(255, 70, 85);
-    public static readonly Color Green = Color.FromArgb(99, 216, 164);
-    public static Color Role(string role) => role switch
+    public static bool IsLight { get; private set; }
+    public static void Set(string value) => IsLight = value == "light";
+    public static Color Background => IsLight ? Color.FromArgb(242, 245, 249) : Color.FromArgb(14, 19, 27);
+    public static Color Surface => IsLight ? Color.White : Color.FromArgb(22, 29, 40);
+    public static Color Elevated => IsLight ? Color.FromArgb(231, 236, 242) : Color.FromArgb(31, 40, 53);
+    public static Color Border => IsLight ? Color.FromArgb(156, 168, 182) : Color.FromArgb(46, 57, 72);
+    public static Color Text => IsLight ? Color.FromArgb(25, 34, 46) : Color.FromArgb(244, 246, 250);
+    public static Color Muted => IsLight ? Color.FromArgb(76, 90, 107) : Color.FromArgb(150, 164, 183);
+    public static Color Red => IsLight ? Color.FromArgb(174, 32, 52) : Color.FromArgb(255, 70, 85);
+    public static Color Green => IsLight ? Color.FromArgb(0, 110, 73) : Color.FromArgb(99, 216, 164);
+    public static Color OnAccent => IsLight ? Color.White : Color.FromArgb(25, 19, 25);
+    public static Color AccentHover => IsLight ? Color.FromArgb(146, 27, 44) : Color.FromArgb(255, 112, 122);
+    public static Color AccentPressed => IsLight ? Color.FromArgb(126, 23, 38) : Color.FromArgb(255, 96, 108);
+    public static Color Hover => IsLight ? Color.FromArgb(211, 220, 230) : Color.FromArgb(62, 79, 99);
+    public static Color Selected => IsLight ? Color.FromArgb(218, 227, 237) : Color.FromArgb(45, 58, 74);
+    public static Color Highlight => IsLight ? Color.FromArgb(255, 231, 234) : Color.FromArgb(57, 38, 46);
+    public static Color CatalogHighlight => IsLight ? Color.FromArgb(255, 230, 233) : Color.FromArgb(51, 34, 42);
+    public static Color Friendly => IsLight ? Color.FromArgb(0, 92, 155) : Color.FromArgb(91, 185, 255);
+    public static Color Opposing => IsLight ? Color.FromArgb(173, 31, 51) : Color.FromArgb(255, 105, 123);
+    public static Color Negative => IsLight ? Color.FromArgb(173, 33, 53) : Color.FromArgb(220, 126, 139);
+    public static Color Role(string role) => IsLight ? role switch
+    {
+        "デュエリスト" => Color.FromArgb(175, 32, 52),
+        "イニシエーター" => Color.FromArgb(0, 100, 117),
+        "コントローラー" => Color.FromArgb(103, 60, 168),
+        "センチネル" => Color.FromArgb(132, 82, 0),
+        _ => Red
+    } : DarkRole(role);
+    private static Color DarkRole(string role) => role switch
     {
         "デュエリスト" => Color.FromArgb(255, 98, 111),
         "イニシエーター" => Color.FromArgb(108, 202, 218),
@@ -23,10 +43,48 @@ internal static class Theme
         "センチネル" => Color.FromArgb(235, 192, 106),
         _ => Red
     };
+
+    public static void Apply(IEnumerable<Control> roots, string value)
+    {
+        var old = new[] { Background, Surface, Elevated, Border, Text, Muted, Red, Green, Hover, Selected, Highlight, CatalogHighlight, Friendly, Opposing, Negative,
+            Role("デュエリスト"), Role("イニシエーター"), Role("コントローラー"), Role("センチネル") };
+        Set(value);
+        var current = new[] { Background, Surface, Elevated, Border, Text, Muted, Red, Green, Hover, Selected, Highlight, CatalogHighlight, Friendly, Opposing, Negative,
+            Role("デュエリスト"), Role("イニシエーター"), Role("コントローラー"), Role("センチネル") };
+        Color Map(Color c) { for (var i = 0; i < old.Length; i++) if (c.ToArgb() == old[i].ToArgb()) return current[i]; return c; }
+        void Visit(Control control)
+        {
+            control.BackColor = Map(control.BackColor);
+            control.ForeColor = Map(control.ForeColor);
+            if (control is DarkForm form) form.ApplyWindowTheme();
+            if (control is ScrollableControl && control.IsHandleCreated) DarkForm.ApplyDarkScrollBars(control);
+            foreach (Control child in control.Controls) Visit(child);
+            control.Invalidate();
+        }
+        foreach (var root in roots)
+        {
+            using var redraw = PageRedrawScope.Begin(root);
+            Visit(root);
+        }
+    }
 }
 
 internal static class UiMetrics
 {
+    // Logical-pixel spacing and control-height tokens. Always pass them through Px()
+    // so the same rhythm survives the app's compact scale and Windows DPI changes.
+    public const int SpacingUnit = 5;
+    public const int TightGap = 5;
+    public const int ControlGap = 10;
+    public const int ContentGap = 15;
+    public const int CardInset = 15;
+    public const int PageInset = 20;
+    public const int SectionGap = 20;
+    public const int ButtonHeight = 40;
+    public const int CompactButtonHeight = 35;
+    public const int ChipHeight = 30;
+    public const int CornerRadius = 10;
+
     public const float CompactScale = .8f;
     public static int Px(Control control, int value) => (int)Math.Round(value * control.DeviceDpi / 96f * CompactScale);
     // Keep text larger than the compact layout for comfortable reading.
@@ -59,6 +117,12 @@ internal static class AgentImages
 
 internal static class RoundedCorners
 {
+    public static void Release(Control control)
+    {
+        var region = control.Region;
+        control.Region = null;
+        region?.Dispose();
+    }
     public static void Apply(Control control, int radius)
     {
         if (control.Width < 2 || control.Height < 2) return;
@@ -75,7 +139,7 @@ public sealed class RoundedCard : Panel
     public RoundedCard()
     {
         BackColor = Theme.Background;
-        Padding = new Padding(14);
+        Padding = new Padding(UiMetrics.Px(this, UiMetrics.CardInset));
         DoubleBuffered = true;
         ResizeRedraw = true;
     }
@@ -102,7 +166,7 @@ public sealed class RoundedCard : Panel
         base.OnPaint(e);
         if (Width < 2 || Height < 2) return;
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = ThemedButton.Rounded(new Rectangle(0, 0, Width - 1, Height - 1), UiMetrics.Px(this, 9));
+        using var path = ThemedButton.Rounded(new Rectangle(0, 0, Width - 1, Height - 1), UiMetrics.Px(this, UiMetrics.CornerRadius));
         using var fill = new SolidBrush(Theme.Surface);
         using var border = new Pen(Theme.Border);
         e.Graphics.FillPath(fill, path);
@@ -115,6 +179,7 @@ public class DarkForm : Form
     private readonly WindowCaption caption;
     private readonly List<Font> compactFonts = [];
     private readonly bool resizable;
+    private readonly Icon ownedIcon;
 
     public DarkForm() : this(resizable: false) { }
 
@@ -123,13 +188,15 @@ public class DarkForm : Form
         this.resizable = resizable;
         // Build every form in logical pixels before applying its display DPI.
         AutoScaleMode = AutoScaleMode.None;
-        Icon = AppIcon.Create();
-        Font = new Font("Yu Gothic UI", 11.5f);
+        ownedIcon = AppIcon.Create();
+        Icon = ownedIcon;
+        Font = SharedFonts.Get("Yu Gothic UI", 11.5f);
         FormBorderStyle = resizable ? FormBorderStyle.Sizable : FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        // Resizable windows can also be maximized (caption button, caption double-click, Win+Up).
+        MaximizeBox = resizable;
         Padding = new Padding(6);
         SizeGripStyle = SizeGripStyle.Hide;
-        caption = new WindowCaption(this);
+        caption = new WindowCaption(this, resizable);
         Controls.Add(caption);
         SetStyle(ControlStyles.ResizeRedraw, true);
     }
@@ -188,15 +255,24 @@ public class DarkForm : Form
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        if (disposing) { foreach (var font in compactFonts) font.Dispose(); compactFonts.Clear(); }
+        if (disposing)
+        {
+            foreach (var font in compactFonts) font.Dispose();
+            compactFonts.Clear();
+            ownedIcon.Dispose();
+        }
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
         if (ClientSize.Width < 2 || ClientSize.Height < 2) return;
-        using var border = new Pen(Color.FromArgb(62, 75, 91));
-        e.Graphics.DrawRectangle(border, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+        // A maximized window meets the screen edges, where a frame line would only look like a gap.
+        if (WindowState != FormWindowState.Maximized)
+        {
+            using var border = new Pen(Theme.Border);
+            e.Graphics.DrawRectangle(border, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+        }
         using var accent = new Pen(Theme.Red, Math.Max(1, UiMetrics.Px(this, 2)));
         e.Graphics.DrawLine(accent, UiMetrics.Px(this, 6), UiMetrics.Px(this, 2),
             UiMetrics.Px(this, 62), UiMetrics.Px(this, 2));
@@ -215,17 +291,22 @@ public class DarkForm : Form
     internal static void ApplyDarkScrollBars(Control control)
     {
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
-        try { _ = SetWindowTheme(control.Handle, "DarkMode_Explorer", null); }
+        try { _ = SetWindowTheme(control.Handle, Theme.IsLight ? "Explorer" : "DarkMode_Explorer", null); }
         catch (DllNotFoundException) { }
         catch (EntryPointNotFoundException) { }
     }
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        ApplyWindowTheme();
+    }
+    internal void ApplyWindowTheme()
+    {
+        if (!IsHandleCreated || IsDisposed) return;
         if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
         try
         {
-            int enabled = 1; _ = SetDwmAttribute(Handle, 20, ref enabled, sizeof(int));
+            int enabled = Theme.IsLight ? 0 : 1; _ = SetDwmAttribute(Handle, 20, ref enabled, sizeof(int));
             int squareCorners = 1; _ = SetDwmAttribute(Handle, 33, ref squareCorners, sizeof(int));
         }
         catch (DllNotFoundException) { }
@@ -247,7 +328,7 @@ public sealed class SwitchToggle : Control
     public SwitchToggle(string text, bool isChecked)
     {
         Text = text; Checked = isChecked; ForeColor = Theme.Text;
-        Font = new Font("Yu Gothic UI", 11.5f); Size = new Size(280, 52); Cursor = Cursors.Hand;
+        Font = SharedFonts.Get("Yu Gothic UI", 11.5f); Size = new Size(280, 52); Cursor = Cursors.Hand;
         AccessibleRole = AccessibleRole.CheckButton; AccessibleName = text; TabStop = true;
         SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
         motion = new InteractionMotion(this);
@@ -258,7 +339,7 @@ public sealed class SwitchToggle : Control
         int S(int value) => UiMetrics.Px(this, value);
         var track = new Rectangle(Width - S(60), (Height - S(30)) / 2, S(56), S(30));
         using var path = ThemedButton.Rounded(track, S(15));
-        var trackColor = !Enabled ? Color.FromArgb(48, 54, 64) : Checked ? Theme.Red : Theme.Border;
+        var trackColor = !Enabled ? Theme.Border : Checked ? Theme.Red : Theme.Border;
         if (Enabled)
         {
             trackColor = InteractionMotion.Blend(trackColor, Color.White, motion.Hover * .18f);
@@ -284,9 +365,19 @@ public sealed class SwitchToggle : Control
     protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
 }
 
+/// <summary>
+/// Visual role of a <see cref="ThemedButton"/>. Default buttons are actions (Primary marks the one main
+/// call to action); Tab buttons switch pages and show the current page with <see cref="ThemedButton.Selected"/>;
+/// Chip buttons are options or toggles whose chosen state is shown with <see cref="ThemedButton.Selected"/>.
+/// Keeping the three apart means the coral fill only ever means "the main action here".
+/// </summary>
+public enum ButtonVariant { Default, Tab, Chip }
+
 public sealed class ThemedButton : Control, IButtonControl
 {
-    private bool primary, isDefault, spacePressed;
+    private bool primary, selected, isDefault, spacePressed;
+    private ButtonVariant variant;
+    private Image? leadingImage;
     private readonly InteractionMotion motion;
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Primary
@@ -295,13 +386,45 @@ public sealed class ThemedButton : Control, IButtonControl
         set { if (primary == value) return; primary = value; Invalidate(); }
     }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public ButtonVariant Variant
+    {
+        get => variant;
+        set
+        {
+            if (variant == value) return;
+            variant = value;
+            AccessibleRole = value == ButtonVariant.Tab ? AccessibleRole.PageTab : AccessibleRole.PushButton;
+            Invalidate();
+        }
+    }
+    /// <summary>Current page (Tab) or chosen option (Chip). Ignored by Default buttons.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool Selected
+    {
+        get => selected;
+        set
+        {
+            if (selected == value) return;
+            selected = value;
+            Invalidate();
+            if (IsHandleCreated) AccessibilityNotifyClients(AccessibleEvents.StateChange, -1);
+        }
+    }
+    /// <summary>Optional small image drawn before the text (for example a colour swatch). Not owned by the button.</summary>
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Image? LeadingImage
+    {
+        get => leadingImage;
+        set { if (ReferenceEquals(leadingImage, value)) return; leadingImage = value; Invalidate(); }
+    }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Compact { get; set; }
     [DefaultValue(DialogResult.None)]
     public DialogResult DialogResult { get; set; }
     public ThemedButton()
     {
         BackColor = Theme.Elevated; ForeColor = Theme.Text;
-        Font = new Font("Yu Gothic UI", 11.5f, FontStyle.Bold);
+        Font = SharedFonts.Get("Yu Gothic UI", 11.5f, FontStyle.Bold);
         Size = new Size(180, 52);
         Cursor = Cursors.Hand; TabStop = true; AccessibleRole = AccessibleRole.PushButton;
         // A native BUTTON can draw its accent border outside OnPaint. Use one
@@ -319,29 +442,100 @@ public sealed class ThemedButton : Control, IButtonControl
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var shift = Enabled ? (int)Math.Round(UiMetrics.Px(this, 2) * motion.Press) : 0;
         var bounds = new Rectangle(shift, shift, Math.Max(1, Width - 1 - shift * 2), Math.Max(1, Height - 1 - shift));
-        var fill = !Enabled ? Color.FromArgb(39, 47, 59) : Primary ? Theme.Red : Theme.Elevated;
-        if (Enabled)
+        var surface = Parent?.BackColor ?? Theme.Background;
+        if (surface.A < 255) surface = Theme.Background;
+        Color fill;
+        Color? border;
+        var textColor = Enabled ? ForeColor : Theme.Muted;
+        switch (variant)
         {
-            fill = InteractionMotion.Blend(fill, Primary ? Color.FromArgb(255, 112, 122) : Color.FromArgb(62, 79, 99), motion.Hover);
-            fill = InteractionMotion.Blend(fill, Primary ? Color.FromArgb(199, 42, 57) : Color.FromArgb(15, 21, 30), motion.Press * .85f);
+            case ButtonVariant.Tab:
+                // Pages: a quiet surface, with the current page raised and underlined in the accent colour.
+                fill = !Enabled ? surface : selected ? Theme.Elevated : InteractionMotion.Blend(surface, Theme.Elevated, .65f);
+                if (Enabled)
+                {
+                    fill = InteractionMotion.Blend(fill, selected ? Theme.Hover : Theme.Elevated, motion.Hover * (selected ? .6f : .9f));
+                    fill = InteractionMotion.Blend(fill, Theme.Background, motion.Press * .6f);
+                    textColor = selected ? Theme.Text : InteractionMotion.Blend(Theme.Muted, Theme.Text, .55f + .45f * motion.Hover);
+                }
+                else textColor = Theme.Muted;
+                border = Theme.Border;
+                break;
+            case ButtonVariant.Chip:
+                // Options and toggles: outlined in the accent colour when chosen, never filled like a main action.
+                fill = !Enabled ? Theme.Elevated : selected ? InteractionMotion.Blend(Theme.Elevated, Theme.Red, .2f) : Theme.Elevated;
+                if (Enabled)
+                {
+                    fill = InteractionMotion.Blend(fill, selected ? InteractionMotion.Blend(Theme.Elevated, Theme.Red, .32f) : Theme.Hover, motion.Hover);
+                    fill = InteractionMotion.Blend(fill, Theme.Background, motion.Press * .85f);
+                }
+                border = !Enabled ? Theme.Border
+                    : selected ? Theme.Red : InteractionMotion.Blend(Theme.Border, Theme.Muted, motion.Hover * .55f);
+                break;
+            default:
+                fill = !Enabled ? Theme.Elevated : Primary ? Theme.Red : Theme.Elevated;
+                if (Enabled && Primary) textColor = Theme.OnAccent;
+                if (Enabled)
+                {
+                    fill = InteractionMotion.Blend(fill, Primary ? Theme.AccentHover : Theme.Hover, motion.Hover);
+                    fill = InteractionMotion.Blend(fill, Primary ? Theme.AccentPressed : Theme.Background, motion.Press * .85f);
+                }
+                border = Primary ? null : Enabled ? InteractionMotion.Blend(Theme.Border, Theme.Muted, motion.Hover * .55f) : Theme.Border;
+                break;
         }
         // Clear the outer corner pixels before drawing the rounded surface.
-        e.Graphics.Clear(Parent?.BackColor ?? Theme.Background);
+        e.Graphics.Clear(surface);
         using var path = Rounded(bounds, ButtonRadius);
         using var brush = new SolidBrush(fill); e.Graphics.FillPath(brush, path);
-        if (!Primary)
+        if (border is { } borderColor)
         {
-            var border = Enabled ? InteractionMotion.Blend(Theme.Border, Theme.Muted, motion.Hover * .55f) : Color.FromArgb(55, 64, 78);
-            using var pen = new Pen(border); e.Graphics.DrawPath(pen, path);
+            using var pen = new Pen(borderColor, variant == ButtonVariant.Chip && selected && Enabled ? Math.Max(1f, UiMetrics.Px(this, 2)) : 1f);
+            e.Graphics.DrawPath(pen, path);
+        }
+        if (variant == ButtonVariant.Tab && selected)
+        {
+            var barHeight = Math.Max(2, UiMetrics.Px(this, 3));
+            var inset = Math.Max(ButtonRadius, UiMetrics.Px(this, 12));
+            var bar = new Rectangle(bounds.Left + inset, bounds.Bottom - barHeight, Math.Max(1, bounds.Width - inset * 2), barHeight);
+            using var barPath = Rounded(bar, barHeight / 2);
+            using var accent = new SolidBrush(Enabled ? Theme.Red : Theme.Muted);
+            e.Graphics.FillPath(accent, barPath);
         }
         // Press motion moves the text vertically without reducing the space available to it.
-        var textBounds = Rectangle.Inflate(ClientRectangle, -UiMetrics.Px(this, 16), -UiMetrics.Px(this, 3));
+        var textInset = UiMetrics.Px(this, Compact ? 10 : 16);
+        var textBounds = Rectangle.Inflate(ClientRectangle, -textInset, -UiMetrics.Px(this, 3));
         textBounds.Offset(0, shift);
-        TextRenderer.DrawText(e.Graphics, Text, Font, textBounds, Enabled ? ForeColor : Theme.Muted,
+        if (leadingImage is { Width: > 0, Height: > 0 } image)
+        {
+            var size = Math.Max(1, Math.Min(UiMetrics.Px(this, 22), Height - UiMetrics.Px(this, 12)));
+            var imageBounds = new Rectangle(UiMetrics.Px(this, Compact ? 8 : 10), (Height - size) / 2 + shift, size, size);
+            var state = e.Graphics.Save();
+            using (var clip = Rounded(imageBounds, Math.Max(2, size / 4)))
+            {
+                e.Graphics.SetClip(clip);
+                e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                e.Graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                try { e.Graphics.DrawImage(image, imageBounds); }
+                catch (Exception ex) when (ex is ArgumentException or ExternalException) { }
+            }
+            e.Graphics.Restore(state);
+            using (var frame = Rounded(imageBounds, Math.Max(2, size / 4)))
+            using (var framePen = new Pen(Color.FromArgb(90, Theme.Text)))
+                e.Graphics.DrawPath(framePen, frame);
+            var imageGap = UiMetrics.Px(this, Compact ? 4 : 6);
+            textBounds = Rectangle.FromLTRB(imageBounds.Right + imageGap, textBounds.Top, textBounds.Right + imageGap, textBounds.Bottom);
+        }
+        TextRenderer.DrawText(e.Graphics, Text, Font, textBounds, textColor,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
         if ((Focused || isDefault) && Enabled && ShowFocusCues)
         {
-            ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(bounds, -UiMetrics.Px(this, 5), -UiMetrics.Px(this, 5)), ForeColor, fill);
+            var ringBounds = Rectangle.Inflate(bounds, -UiMetrics.Px(this, 4), -UiMetrics.Px(this, 4));
+            if (ringBounds.Width > 0 && ringBounds.Height > 0)
+            {
+                using var ringPath = Rounded(ringBounds, Math.Max(2, ButtonRadius - UiMetrics.Px(this, 3)));
+                using var ring = new Pen(Primary ? Theme.OnAccent : Theme.Text, Math.Max(1, UiMetrics.Px(this, 2)));
+                e.Graphics.DrawPath(ring, ringPath);
+            }
         }
     }
     public void NotifyDefault(bool value) { isDefault = value; Invalidate(); }
@@ -381,8 +575,18 @@ public sealed class ThemedButton : Control, IButtonControl
     {
         public override string? DefaultAction => "押す";
         public override void DoDefaultAction() => owner.PerformClick();
+        public override AccessibleStates State
+        {
+            get
+            {
+                var state = base.State;
+                if (owner.Selected && owner.Variant == ButtonVariant.Tab) state |= AccessibleStates.Selected;
+                else if (owner.Selected && owner.Variant == ButtonVariant.Chip) state |= AccessibleStates.Checked;
+                return state;
+            }
+        }
     }
-    private int ButtonRadius => Math.Min(UiMetrics.Px(this, 12), Math.Max(4, Height / 3));
+    private int ButtonRadius => Math.Min(UiMetrics.Px(this, UiMetrics.CornerRadius), Math.Max(4, Height / 3));
     private void UpdateRoundedRegion()
     {
         if (Width < 2 || Height < 2) return;
@@ -394,10 +598,17 @@ public sealed class ThemedButton : Control, IButtonControl
         Invalidate();
     }
     protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) RoundedCorners.Release(this);
+        base.Dispose(disposing);
+    }
     internal static GraphicsPath Rounded(Rectangle rect, int radius)
     {
-        var path = new GraphicsPath(); var d = radius * 2;
-        if (radius < 2) { path.AddRectangle(rect); return path; }
+        var path = new GraphicsPath();
+        if (rect.Width <= 0 || rect.Height <= 0) return path;
+        var d = Math.Min(Math.Max(0, radius * 2), Math.Min(rect.Width, rect.Height));
+        if (d < 2) { path.AddRectangle(rect); return path; }
         path.AddArc(rect.X, rect.Y, d, d, 180, 90); path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
         path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90); path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90); path.CloseFigure();
         return path;
@@ -426,6 +637,12 @@ internal sealed class ThemeMenuRenderer : ToolStripProfessionalRenderer
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
         e.TextColor = e.Item.Enabled ? Theme.Text : Theme.Muted;
+        // ToolStrip's default text rectangle excludes vertical padding even
+        // though our highlight covers the whole item. Centre text in that row.
+        var bounds = e.TextRectangle;
+        e.TextRectangle = new Rectangle(bounds.X, 0, bounds.Width, e.Item.Height);
+        e.TextFormat = (e.TextFormat & ~(TextFormatFlags.Top | TextFormatFlags.Bottom))
+            | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine;
         base.OnRenderItemText(e);
     }
 
@@ -485,7 +702,7 @@ public sealed class ThemedSelect : Control
         this.items = items.ToList();
         this.available = available?.ToArray() ?? Enumerable.Repeat(true, this.items.Count).ToArray();
         if (this.available.Length != this.items.Count) throw new ArgumentException("Option availability must match the item count", nameof(available));
-        Height = 48; BackColor = Theme.Elevated; ForeColor = Theme.Text; Font = new Font("Yu Gothic UI", 11.5f);
+        Height = 48; BackColor = Theme.Elevated; ForeColor = Theme.Text; Font = SharedFonts.Get("Yu Gothic UI", 11.5f);
         Cursor = Cursors.Hand; TabStop = true; AccessibleRole = AccessibleRole.ComboBox;
         SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
         SizeChanged += (_, _) => RoundedCorners.Apply(this, 6);
@@ -494,10 +711,12 @@ public sealed class ThemedSelect : Control
     }
     protected override void OnPaint(PaintEventArgs e)
     {
-        base.OnPaint(e); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        base.OnPaint(e);
+        if (Width < 2 || Height < 2) return;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
         using var path = ThemedButton.Rounded(bounds, 6);
-        var fillColor = Enabled ? InteractionMotion.Blend(Color.FromArgb(26, 34, 46), Color.FromArgb(55, 70, 89), motion.Hover) : Color.FromArgb(31, 36, 45);
+        var fillColor = Enabled ? InteractionMotion.Blend(Theme.Elevated, Theme.Hover, motion.Hover) : Theme.Elevated;
         if (Enabled) fillColor = InteractionMotion.Blend(fillColor, Theme.Background, motion.Press * .65f);
         using var fill = new SolidBrush(fillColor);
         using var border = new Pen(Focused ? Theme.Red : InteractionMotion.Blend(Theme.Border, Theme.Muted, Enabled ? motion.Hover * .5f : 0));
@@ -533,32 +752,42 @@ public sealed class ThemedSelect : Control
             entry.Click += (_, _) => SelectedIndex = index;
             picker.Items.Add(entry);
         }
-        picker.Opened += (_, _) =>
+        // Measure before showing so the first visible frame has its final dimensions.
+        picker.PerformLayout();
+        picker.SuspendLayout();
+        foreach (ToolStripItem item in picker.Items)
         {
-            // Keep the drop-down and the field the same width.
-            if (picker == null) return;
-            picker.SuspendLayout();
-            picker.AutoSize = false;
-            foreach (ToolStripItem item in picker.Items)
-            {
-                item.AutoSize = false;
-                item.Width = Math.Max(1, Width - picker.Padding.Horizontal - 2);
-            }
-            picker.Width = Width;
-            picker.ResumeLayout(false);
-            var area = Screen.FromControl(this).WorkingArea;
-            if (picker.Right > area.Right) picker.Left = Math.Max(area.Left, area.Right - picker.Width);
-        };
+            item.AutoSize = false;
+            item.Width = Math.Max(1, Width - picker.Padding.Horizontal - 2);
+        }
+        var area = Screen.FromControl(this).WorkingArea;
+        picker.MinimumSize = new Size(Width, 0);
+        picker.MaximumSize = new Size(Width, area.Height);
+        picker.AutoSize = true;
+        picker.ResumeLayout(true);
         picker.Closed += (_, _) =>
         {
             var closed = picker; picker = null;
-            if (closed != null && IsHandleCreated && !IsDisposed) BeginInvoke(closed.Dispose);
-            Invalidate();
+            if (closed != null)
+            {
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(closed.Dispose);
+                else closed.Dispose();
+            }
+            if (!IsDisposed) Invalidate();
         };
-        picker.Show(this, new Point(0, Height));
+        var screenPoint = PointToScreen(new Point(0, Height));
+        screenPoint.X = Math.Clamp(screenPoint.X, area.Left, Math.Max(area.Left, area.Right - picker.Width));
+        if (screenPoint.Y + picker.Height > area.Bottom) screenPoint.Y = PointToScreen(Point.Empty).Y - picker.Height;
+        screenPoint.Y = Math.Clamp(screenPoint.Y, area.Top, Math.Max(area.Top, area.Bottom - picker.Height));
+        picker.Show(this, PointToClient(screenPoint));
     }
     protected override void OnClick(EventArgs e) { base.OnClick(e); ShowPicker(); }
     protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { picker?.Dispose(); picker = null; RoundedCorners.Release(this); }
+        base.Dispose(disposing);
+    }
     protected override void OnKeyDown(KeyEventArgs e)
     {
         base.OnKeyDown(e);
@@ -636,6 +865,11 @@ public sealed class ThemedTextEntry : UserControl
         e.Graphics.DrawPath(border, path);
         base.OnPaint(e);
     }
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) RoundedCorners.Release(this);
+        base.Dispose(disposing);
+    }
 }
 
 public sealed class HeroPanel : Panel
@@ -647,7 +881,10 @@ public sealed class HeroPanel : Panel
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool ChooseEnabled { get => choose.Enabled; set => choose.Enabled = value; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public bool AgentAvailable { get => agentAvailable; set { if (agentAvailable != value) { agentAvailable = value; Invalidate(); } } }
+    public bool AgentAvailable { get => agentAvailable; set { if (agentAvailable != value) { agentAvailable = value; UpdateChooseRole(); Invalidate(); } } }
+    // Choosing is the main next step only while no usable agent is set; afterwards it is a secondary action
+    // so the dashboard keeps a single accent-filled call to action.
+    private void UpdateChooseRole() => choose.Primary = agent == null || !agentAvailable;
     public HeroPanel()
     {
         DoubleBuffered = true; ResizeRedraw = true; BackColor = Theme.Surface;
@@ -659,11 +896,12 @@ public sealed class HeroPanel : Panel
     public Agent? Agent
     {
         get => agent;
-        set { agent = value; choose.Text = value == null ? "エージェントを選ぶ" : "エージェントを変更"; Invalidate(); }
+        set { agent = value; choose.Text = value == null ? "エージェントを選ぶ" : "エージェントを変更"; UpdateChooseRole(); Invalidate(); }
     }
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+        if (Width < 2 || Height < 2) return;
         var g = e.Graphics; g.SmoothingMode = SmoothingMode.HighQuality;
         int S(int value) => UiMetrics.Px(this, value);
         g.Clear(Theme.Surface);
@@ -672,7 +910,7 @@ public sealed class HeroPanel : Panel
         g.SetClip(clip, CombineMode.Intersect);
         if (agent == null)
         {
-            using var brush = new LinearGradientBrush(ClientRectangle, Color.FromArgb(36, 45, 60), Color.FromArgb(17, 23, 33), 10f);
+            using var brush = new LinearGradientBrush(ClientRectangle, Theme.Elevated, Theme.Surface, 10f);
             g.FillRectangle(brush, ClientRectangle);
             using var motif = new Pen(Color.FromArgb(30, Theme.Text), 1);
             for (int x = Width - 30; x < Width + 170; x += 32) g.DrawLine(motif, x, 0, x - 180, Height);
@@ -695,8 +933,8 @@ public sealed class HeroPanel : Panel
             using var leftShade = new LinearGradientBrush(ClientRectangle, Color.FromArgb(248, Theme.Background), Color.FromArgb(0, Theme.Background), LinearGradientMode.Horizontal);
             leftShade.InterpolationColors = new ColorBlend
             {
-                Colors = [Color.FromArgb(248, Theme.Background), Color.FromArgb(0, Theme.Background), Color.FromArgb(0, Theme.Background)],
-                Positions = [0f, .75f, 1f]
+                Colors = [Color.FromArgb(255, Theme.Background), Color.FromArgb(245, Theme.Background), Color.FromArgb(0, Theme.Background)],
+                Positions = [0f, .6f, 1f]
             };
             g.FillRectangle(leftShade, ClientRectangle);
             using var edge = new SolidBrush(Theme.Role(agent.Role)); g.FillRectangle(edge, 0, 0, S(4), Height);
@@ -705,9 +943,10 @@ public sealed class HeroPanel : Panel
         g.Restore(originalState);
         using var promptFont = new Font("Yu Gothic UI", UiMetrics.DisplayFontSize(26), FontStyle.Bold);
         using var roleFont = new Font("Yu Gothic UI", UiMetrics.FontSize(12), FontStyle.Bold);
+        var textTop = Math.Clamp(choose.Top - S(124), S(32), Math.Max(S(74), Height - S(190)));
         if (agent == null)
         {
-            TextRenderer.DrawText(g, "エージェントを選択", promptFont, new Rectangle(S(29), S(74), Width - S(58), S(70)), Theme.Text,
+            TextRenderer.DrawText(g, "エージェントを選択", promptFont, new Rectangle(S(29), textTop, Width - S(58), S(70)), Theme.Text,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
         }
         else
@@ -721,10 +960,10 @@ public sealed class HeroPanel : Panel
                 nameSize -= 1.6f;
             }
             using var nameFont = new Font("Yu Gothic UI", nameSize, FontStyle.Bold);
-            TextRenderer.DrawText(g, agent.Name, nameFont, new Rectangle(S(29), S(74), textWidth, S(70)), agentAvailable ? Theme.Text : Theme.Muted,
+            TextRenderer.DrawText(g, agent.Name, nameFont, new Rectangle(S(29), textTop, textWidth, S(70)), agentAvailable ? Theme.Text : Theme.Muted,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             var roleColor = agentAvailable ? Theme.Role(agent.Role) : Theme.Muted;
-            TextRenderer.DrawText(g, agentAvailable ? agent.Role : "未所有 · 変更してください", roleFont, new Rectangle(S(29), S(151), textWidth, S(29)), roleColor,
+            TextRenderer.DrawText(g, agentAvailable ? agent.Role : "未解放 · 変更してください", roleFont, new Rectangle(S(29), textTop + S(74), textWidth, S(29)), roleColor,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
         }
         using var border = new Pen(Theme.Border);
@@ -736,6 +975,11 @@ public sealed class HeroPanel : Panel
         var scale = Math.Max((float)rect.Width / image.Width, (float)rect.Height / image.Height);
         var width = image.Width * scale; var height = image.Height * scale;
         g.DrawImage(image, new RectangleF(rect.X + (rect.Width - width) / 2, rect.Y + (rect.Height - height) / 2, width, height));
+    }
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) RoundedCorners.Release(this);
+        base.Dispose(disposing);
     }
 }
 
@@ -758,7 +1002,9 @@ public sealed class AgentTile : Panel
     }
     protected override void OnPaint(PaintEventArgs e)
     {
-        base.OnPaint(e); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        base.OnPaint(e);
+        if (Width < 2 || Height < 2) return;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         using var path = ThemedButton.Rounded(new Rectangle(0, 0, Width - 1, Height - 1), UiMetrics.Px(this, 9));
         var accent = Available ? Theme.Role(Agent.Role) : Theme.Muted;
         var fillColor = selected ? InteractionMotion.Blend(Theme.Surface, accent, .14f) : Theme.Surface;
@@ -796,9 +1042,14 @@ public sealed class AgentTile : Panel
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
         if (!Available)
-            TextRenderer.DrawText(e.Graphics, "未所有", badgeFont, new Rectangle(S(5), S(5), Width - S(10), S(24)), Theme.Muted,
+            TextRenderer.DrawText(e.Graphics, "未解放", badgeFont, new Rectangle(S(5), S(5), Width - S(10), S(24)), Theme.Muted,
                 TextFormatFlags.Right | TextFormatFlags.Top | TextFormatFlags.SingleLine);
         if (Focused) ControlPaint.DrawFocusRectangle(e.Graphics, new Rectangle(4, 4, Width - 9, Height - 9));
+    }
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) RoundedCorners.Release(this);
+        base.Dispose(disposing);
     }
 }
 
@@ -909,7 +1160,7 @@ public sealed class AgentPickerDialog : DarkForm
     private readonly Label footer = new()
     {
         Text = "クリックで選択　·　Escで戻る", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft,
-        ForeColor = Theme.Muted, Font = new Font("Yu Gothic UI", 9.5f), Padding = new Padding(12, 0, 0, 0),
+        ForeColor = Theme.Muted, Font = SharedFonts.Get("Yu Gothic UI", 9.5f), Padding = new Padding(12, 0, 0, 0),
         BackColor = Theme.Surface
     };
     private readonly List<RoleGroup> roleGroups = [];
@@ -936,7 +1187,7 @@ public sealed class AgentPickerDialog : DarkForm
             var tiles = group.OrderBy(a => a.Name, StringComparer.CurrentCulture).Select(agent => new AgentTile(agent,
                 string.Equals(agent.Id, selectedId, StringComparison.OrdinalIgnoreCase), allowed == null || allowed.Contains(agent.Id))
             {
-                Dock = DockStyle.Fill, AccessibleName = $"{agent.Name}、{agent.Role}" + (allowed != null && !allowed.Contains(agent.Id) ? "、未所有" : ""),
+                Dock = DockStyle.Fill, AccessibleName = $"{agent.Name}、{agent.Role}" + (allowed != null && !allowed.Contains(agent.Id) ? "、未解放" : ""),
                 Margin = new Padding(6), TabIndex = nextTabIndex++
             }).ToList();
             foreach (var tile in tiles)
@@ -949,7 +1200,7 @@ public sealed class AgentPickerDialog : DarkForm
             var heading = new Label
             {
                 Text = $"{group.Key}　{tiles.Count}人", Location = Point.Empty, Height = 38,
-                Font = new Font("Yu Gothic UI", 13f, FontStyle.Bold), ForeColor = Theme.Role(group.Key),
+                Font = SharedFonts.Get("Yu Gothic UI", 13f, FontStyle.Bold), ForeColor = Theme.Role(group.Key),
                 TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true
             };
             var grid = new TableLayoutPanel

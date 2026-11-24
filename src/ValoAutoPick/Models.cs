@@ -9,6 +9,7 @@ public static class Edition
 #else
     public static bool IsTrial => false;
 #endif
+    public static string DisplayName => IsTrial ? "SpikeSide 体験版" : "SpikeSide";
 }
 
 public record Agent(string Id, string Name, string Role, string RoleIconId = "", bool IsBaseContent = false)
@@ -53,17 +54,20 @@ public sealed class Settings
     public bool StartOnLaunch { get; set; } = false;
     public string Region { get; set; } = "auto";
     public bool SystemBrowserLogin { get; set; }
+    public string Theme { get; set; } = "dark";
     public Settings Normalize()
     {
         if (!Guid.TryParse(AgentId, out _)) AgentId = "";
         MapAgents = (MapAgents ?? new()).Where(x => !string.IsNullOrWhiteSpace(x.Key) && Guid.TryParse(x.Value, out _)).GroupBy(x => MapCatalog.Key(x.Key), StringComparer.OrdinalIgnoreCase).Where(x => x.Key.Length > 0).ToDictionary(x => x.Key, x => x.Last().Value, StringComparer.OrdinalIgnoreCase);
         if (Edition.IsTrial) MapAgents.Clear();
         if (!new[] { "auto", "ap", "na", "eu", "kr", "br", "latam", "pbe" }.Contains(Region)) Region = "auto";
+        Theme = string.Equals(Theme, "light", StringComparison.OrdinalIgnoreCase) ? "light" : "dark";
         return this;
     }
 }
 public static class Storage
 {
+    private static readonly JsonSerializerOptions SaveJson = new() { WriteIndented = true };
     public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ValoAutoPick");
     public static string SettingsPath => Path.Combine(Folder, Edition.IsTrial ? "quickpickerpro-trial-settings.json" : "quickpickerpro-settings.json");
     public static Settings Load()
@@ -90,13 +94,33 @@ public static class Storage
     public static void Save(Settings settings)
     {
         Directory.CreateDirectory(Folder);
-        File.WriteAllText(SettingsPath + ".tmp", JsonSerializer.Serialize(settings.Normalize(), new JsonSerializerOptions { WriteIndented = true }));
-        File.Move(SettingsPath + ".tmp", SettingsPath, true);
+        var temp = $"{SettingsPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(temp, JsonSerializer.Serialize(settings.Normalize(), SaveJson));
+            File.Move(temp, SettingsPath, true);
+        }
+        finally
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        }
     }
 }
 public record Player(string Subject, string CharacterID, string CharacterSelectionState);
 public record MatchSnapshot(string Id, string State, IReadOnlyList<Player> Allies, string MapId = "");
 public sealed record RiotMatchHistoryEntry(string MatchId, long GameStartTime, string QueueId);
+public sealed record RiotMatchHistoryPage(IReadOnlyList<RiotMatchHistoryEntry> Entries, int RawCount, int? Total);
+
+internal static class MatchHistoryPaging
+{
+    internal static (int NextIndex, bool HasMore) Advance(int previousNextIndex, bool previousHasMore, bool refresh, int startIndex, int pageSize, int rawCount, int? total)
+    {
+        var next = refresh ? Math.Max(previousNextIndex, startIndex + pageSize) : startIndex + pageSize;
+        var hasMore = total.HasValue ? next < total.Value : refresh && previousNextIndex > pageSize ? previousHasMore : rawCount == pageSize;
+        return (next, hasMore);
+    }
+}
 public static class MapCatalog
 {
     public static readonly (string Key, string Name)[] Maps = [

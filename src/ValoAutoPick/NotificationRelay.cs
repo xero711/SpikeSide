@@ -50,16 +50,20 @@ internal sealed class NotificationRelayServer : IDisposable
     private readonly SemaphoreSlim slots = new(4, 4);
     private readonly object sync = new();
     private readonly HashSet<Peer> peers = [];
+    private readonly HashSet<Task> handlers = [];
+    private Task? acceptTask;
+    private int disposed;
     private string subject = "";
 
     internal NotificationRelayServer(IPAddress address, int port, byte[] key)
     {
         listener = new TcpListener(address, port);
+        listener.ExclusiveAddressUse = true;
         this.key = key.ToArray();
     }
 
     internal int Port => ((IPEndPoint)listener.LocalEndpoint).Port;
-    internal void Start() { listener.Start(); _ = AcceptLoop(); }
+    internal void Start() { listener.Start(); acceptTask = AcceptLoop(); }
 
     internal void SetSubject(string value)
     {
@@ -93,7 +97,10 @@ internal sealed class NotificationRelayServer : IDisposable
             {
                 var client = await listener.AcceptTcpClientAsync(stop.Token);
                 if (!slots.Wait(0)) { client.Dispose(); continue; }
-                _ = Serve(client);
+                var handler = Serve(client);
+                lock (sync) handlers.Add(handler);
+                _ = handler.ContinueWith(completed => { lock (sync) handlers.Remove(completed); },
+                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
         }
         catch (Exception e) when (e is OperationCanceledException or ObjectDisposedException or SocketException) { }
@@ -142,9 +149,19 @@ internal sealed class NotificationRelayServer : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stop.Cancel(); listener.Stop();
         Peer[] old; lock (sync) { subject = ""; old = peers.ToArray(); }
         foreach (var peer in old) peer.Close();
+        _ = DisposeWhenStopped();
+    }
+
+    private async Task DisposeWhenStopped()
+    {
+        if (acceptTask != null) try { await acceptTask; } catch (Exception) { }
+        Task[] active; lock (sync) active = handlers.ToArray();
+        try { await Task.WhenAll(active); } catch (Exception) { }
+        slots.Dispose(); stop.Dispose();
     }
 
     private sealed class Peer(TcpClient client, byte[] key, byte[] clientNonce, byte[] serverNonce, string subject)
@@ -171,7 +188,9 @@ internal sealed class NotificationRelayServer : IDisposable
                 BinaryPrimitives.WriteUInt64BigEndian(frame.AsSpan(1, sizeof(ulong)), ++sequence);
                 var mac = RelayProtocol.Mac(key, "frame", clientNonce, serverNonce, subject, frame.AsSpan(0, 9));
                 mac.CopyTo(frame, 9);
-                await stream.WriteAsync(frame, ct);
+                using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                writeTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+                await stream.WriteAsync(frame, writeTimeout.Token);
             }
         }
     }

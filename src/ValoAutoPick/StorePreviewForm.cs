@@ -26,12 +26,13 @@ public sealed class StorePreviewControl : UserControl
     private readonly bool shellAuthentication;
     private readonly CancellationTokenSource lifetime = new();
     private readonly System.Windows.Forms.Timer countdownTimer = new() { Interval = 1000 };
-    private readonly ThemedButton storeTab = new() { Text = "今日のSTORE", Size = new(180, 40), Compact = true, Primary = true };
-    private readonly ThemedButton catalogTab = new() { Text = "武器カタログ", Size = new(168, 40), Compact = true };
-    private readonly ThemedButton dailySectionTab = new() { Text = "デイリー", Size = new(132, 38), Compact = true, Primary = true };
-    private readonly ThemedButton nightSectionTab = new() { Text = "ナイトマーケット", Size = new(176, 38), Compact = true, Visible = false };
-    private readonly ThemedButton bundleSectionTab = new() { Text = "注目バンドル", Size = new(150, 38), Compact = true, Visible = false };
-    private readonly ThemedButton accessorySectionTab = new() { Text = "アクセサリー", Size = new(142, 38), Compact = true, Visible = false };
+    // Page and section switches use the Tab style; the coral fill is kept for actions only.
+    private readonly ThemedButton storeTab = new() { Text = "今日のSTORE", Size = new(180, 40), Compact = true, Variant = ButtonVariant.Tab, Selected = true };
+    private readonly ThemedButton catalogTab = new() { Text = "武器カタログ", Size = new(168, 40), Compact = true, Variant = ButtonVariant.Tab };
+    private readonly ThemedButton dailySectionTab = new() { Text = "デイリー", Size = new(132, 38), Compact = true, Variant = ButtonVariant.Tab, Selected = true };
+    private readonly ThemedButton nightSectionTab = new() { Text = "ナイトマーケット", Size = new(176, 38), Compact = true, Visible = false, Variant = ButtonVariant.Tab };
+    private readonly ThemedButton bundleSectionTab = new() { Text = "注目バンドル", Size = new(150, 38), Compact = true, Visible = false, Variant = ButtonVariant.Tab };
+    private readonly ThemedButton accessorySectionTab = new() { Text = "アクセサリー", Size = new(142, 38), Compact = true, Visible = false, Variant = ButtonVariant.Tab };
     private readonly ThemedButton previousCatalogPage = new() { Text = "前へ", Size = new(92, 34), Compact = true };
     private readonly ThemedButton nextCatalogPage = new() { Text = "次へ", Size = new(92, 34), Compact = true };
     private readonly Label catalogPageLabel = NativePageStyle.Label("1 / 1", NativePageStyle.Small, Theme.Muted);
@@ -39,13 +40,18 @@ public sealed class StorePreviewControl : UserControl
     private readonly ThemedButton logoutButton = new() { Text = "ログアウト", Size = new(122, 40), Compact = true };
     private readonly ThemedButton refreshStoreButton = new() { Text = "今日のショップを更新", Size = new(204, 40), Compact = true };
     private readonly ThemedButton refreshCatalogButton = new() { Text = "カタログ更新", Size = new(150, 40), Compact = true };
-    private readonly ThemedButton playVideoButton = new() { Text = "▶ 動画を再生", Size = new(156, 38), Compact = true };
-    private readonly ThemedButton stopVideoButton = new() { Text = "画像に戻る", Size = new(132, 38), Compact = true };
+    private readonly ThemedButton playVideoButton = new() { Text = "▶ 再生", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, AccessibleName = "選択中スキンの動画を再生" };
+    private readonly ThemedButton playbackButton = new() { Text = "⏸ 一時停止", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, Visible = false };
+    private readonly ThemedButton muteVideoButton = new() { Text = "音声をオン", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, Visible = false };
+    private readonly ThemedButton stopVideoButton = new() { Text = "画像に戻る", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true };
+    private readonly ToolTip mediaToolTips = new() { InitialDelay = 500, ShowAlways = true };
     private readonly Label accountLabel = NativePageStyle.Label("Riotアカウント未接続", NativePageStyle.Small, Theme.Muted);
     private readonly Label skinCountLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
     private readonly Label chromaCountLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
     private readonly Label videoCountLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
     private readonly Label statusLabel = NativePageStyle.Label("Riotアカウント未接続", NativePageStyle.Small, Theme.Muted);
+    private readonly WaitingIndicator statusSpinner = new(ringSize: 14, textGap: 6, showDelay: 80) { Dock = DockStyle.Left, Visible = false };
+    private readonly List<(StorefrontBundle Bundle, Label Detail)> bundleDetails = [];
     private readonly Label catalogTitle = NativePageStyle.Label("スキンを選ぶと、画像・動画・カラーバリエーションを表示します。", NativePageStyle.Subheading);
     private readonly Label catalogMeta = NativePageStyle.Label("", NativePageStyle.Small, Theme.Muted);
     private readonly Label previewMessage = NativePageStyle.Label("スキンを選ぶとプレビューが表示されます。", NativePageStyle.Small, Theme.Muted);
@@ -60,15 +66,20 @@ public sealed class StorePreviewControl : UserControl
     private readonly ResponsiveCardGrid nightOffers = OfferGrid(1.35);
     private readonly ResponsiveCardGrid bundleCards = OfferGrid(1.5);
     private readonly ResponsiveCardGrid accessoryCards = OfferGrid(1.2);
-    private readonly FlowLayoutPanel catalogGrid = new() { Dock = DockStyle.Fill, AutoScroll = false, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, BackColor = Theme.Background, Margin = Padding.Empty, Padding = new Padding(2) };
+    private readonly FlowLayoutPanel catalogGrid = new() { Dock = DockStyle.Fill, AutoScroll = false, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = new Padding(2) };
     private readonly Panel catalogGridHost = new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
     private readonly SkeletonScreen catalogSkeleton = new(SkeletonLayout.CatalogCards) { Dock = DockStyle.Fill, BackColor = Theme.Surface, Visible = false };
     private readonly FlowLayoutPanel chromaOptions = new() { AutoSize = true, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Surface, Margin = Padding.Empty };
     private readonly FlowLayoutPanel levelOptions = new() { AutoSize = true, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Surface, Margin = Padding.Empty };
     private readonly Panel storePage = new() { Dock = DockStyle.Fill, BackColor = Theme.Background };
     private readonly Panel catalogPage = new() { Dock = DockStyle.Fill, BackColor = Theme.Background, Visible = false };
-    private readonly Panel visualHost = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(10, 13, 19), Margin = Padding.Empty };
-    private readonly SharpImageBox previewImage = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(10, 13, 19) };
+    private Control previewPanel = null!;
+    private bool disposingStore;
+    private EventHandler<System.Windows.ExceptionRoutedEventArgs>? mediaFailedHandler;
+    private System.Windows.RoutedEventHandler? mediaOpenedHandler;
+    private System.Windows.RoutedEventHandler? mediaEndedHandler;
+    private readonly Panel visualHost = new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
+    private readonly SharpImageBox previewImage = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(10, 13, 19), RoundedCorners = true, DarkStage = true };
     private readonly ElementHost videoHost = new() { Dock = DockStyle.Fill, BackColor = Color.FromArgb(10, 13, 19), Visible = false };
     private readonly SkeletonScreen videoLoadingOverlay = new(SkeletonLayout.MediaPreview) { Dock = DockStyle.Fill, BackColor = Color.FromArgb(10, 13, 19), Visible = false };
     private readonly System.Windows.Forms.Timer videoOpenTimer = new() { Interval = 20_000 };
@@ -78,7 +89,7 @@ public sealed class StorePreviewControl : UserControl
         HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch,
         VerticalAlignment = System.Windows.VerticalAlignment.Stretch
     };
-    private readonly MediaElement mediaPlayer = new() { LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Stop, Stretch = Stretch.Uniform, IsMuted = true, Volume = 0 };
+    private readonly MediaElement mediaPlayer = new() { LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Stop, Stretch = Stretch.Uniform, IsMuted = true, Volume = .2 };
     private readonly ThemedTextEntry searchBox = new() { PlaceholderText = "スキン名・武器名で検索" };
     private readonly ThemedSelect categorySelect = new(["すべてのカテゴリー"]);
     private readonly ThemedSelect weaponSelect = new(["すべての武器"]);
@@ -100,14 +111,18 @@ public sealed class StorePreviewControl : UserControl
     private int catalogCardSubtitleHeight;
     private bool catalogEnsureSelectedVisible;
     private int previewGeneration;
+    private int catalogMetricsGeneration;
     private (SkinCard? Skin, int Chroma, int Level)? displayedPreview;
     private CancellationTokenSource? previewImageLoad;
+    private CancellationTokenSource? catalogMetricsStop;
     private int storeGeneration;
     private CancellationTokenSource? activeStoreLoad;
     private CancellationTokenSource? videoLoad;
     private bool videoOpening;
+    private bool videoPaused;
     private TaskCompletionSource<bool>? playbackOpened;
     private Action? resizePreviewLayout;
+    private Action? resizeMediaActions;
     private bool catalogLoaded;
     private bool catalogTextMetricsReady;
     private bool loadingCatalog;
@@ -119,7 +134,7 @@ public sealed class StorePreviewControl : UserControl
     private bool loopVideo = true;
     private string settledStatus = "Riotアカウント未接続";
     private bool settledStatusError;
-    private string activeProgressStatus = "";
+    private readonly List<string> activeProgressStatuses = [];
 
     public event EventHandler? LoginRequested;
     public event EventHandler? LogoutRequested;
@@ -149,8 +164,9 @@ public sealed class StorePreviewControl : UserControl
             ShowPreviewImage();
             SetStatus("動画の読み込みに時間がかかっています。もう一度お試しください。", true);
         };
-        mediaPlayer.MediaFailed += (_, e) =>
+        mediaFailedHandler = (_, e) =>
         {
+            if (disposingStore || IsDisposed || Disposing) return;
             if (!videoOpening && !videoHost.Visible) return;
             videoOpenTimer.Stop();
             videoOpening = false;
@@ -162,53 +178,77 @@ public sealed class StorePreviewControl : UserControl
             ShowPreviewImage();
             SetStatus("この動画を再生できませんでした。画像プレビューは引き続き利用できます。", true);
         };
-        mediaPlayer.MediaOpened += (_, _) =>
+        mediaPlayer.MediaFailed += mediaFailedHandler;
+        mediaOpenedHandler = (_, _) =>
         {
+            if (disposingStore || IsDisposed || Disposing) return;
             if (!videoOpening) return;
             videoOpenTimer.Stop();
             videoOpening = false;
             videoLoadingOverlay.Loading = false;
+            videoLoadingOverlay.Visible = false;
+            previewImage.Visible = false;
+            // Leave the 1x1 parking spot from PlayPreviewVideoAsync and take the full preview area.
+            RestoreVideoHost(visible: true);
+            videoHost.BringToFront();
             ResizeVideoSurface();
             videoSurface.UpdateLayout();
             PreviewVideoResult = $"MediaOpened:{mediaPlayer.NaturalVideoWidth}x{mediaPlayer.NaturalVideoHeight}:{mediaPlayer.ActualWidth:0}x{mediaPlayer.ActualHeight:0}:{videoHost.ClientSize.Width}x{videoHost.ClientSize.Height}";
-            videoLoadingOverlay.Visible = false;
-            previewImage.Visible = false;
-            videoHost.Visible = true;
-            videoHost.BringToFront();
-            stopVideoButton.Text = "画像に戻る";
+            playVideoButton.Visible = false;
+            stopVideoButton.Text = "画像へ";
             stopVideoButton.Invalidate();
             stopVideoButton.Visible = true;
             playbackOpened?.TrySetResult(true);
+            videoPaused = false;
+            UpdateVideoControls();
+            playbackButton.Visible = true;
+            muteVideoButton.Visible = true;
+            EndProgress(VideoPrepareStatus);
             SetStatus("", false);
         };
-        mediaPlayer.MediaEnded += (_, _) =>
+        mediaPlayer.MediaOpened += mediaOpenedHandler;
+        mediaEndedHandler = (_, _) =>
         {
+            if (disposingStore || IsDisposed || Disposing) return;
             if (!loopVideo || !videoHost.Visible) return;
             mediaPlayer.Position = TimeSpan.Zero;
             mediaPlayer.Play();
         };
+        mediaPlayer.MediaEnded += mediaEndedHandler;
         BuildInterface();
         WireEvents();
         UpdateAccountState();
         RenderStorefront();
         RenderCatalogGrid();
         countdownTimer.Tick += (_, _) => UpdateCountdowns();
-        countdownTimer.Start();
-        Disposed += (_, _) =>
+        if (Visible) countdownTimer.Start();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && !disposingStore)
         {
+            disposingStore = true;
             lifetime.Cancel();
             activeStoreLoad?.Cancel();
             videoLoad?.Cancel();
+            catalogMetricsStop?.Cancel();
+            if (mediaFailedHandler is not null) mediaPlayer.MediaFailed -= mediaFailedHandler;
+            if (mediaOpenedHandler is not null) mediaPlayer.MediaOpened -= mediaOpenedHandler;
+            if (mediaEndedHandler is not null) mediaPlayer.MediaEnded -= mediaEndedHandler;
             StopMedia();
+            videoHost.Child = null;
             videoOpenTimer.Dispose();
             countdownTimer.Stop(); countdownTimer.Dispose();
+            mediaToolTips.Dispose();
             catalog.Dispose(); loginWindow?.Dispose();
             if (ownsRiot) riot.Dispose();
             previewImageLoad?.Cancel();
             previewImageLoad?.Dispose();
             storeImageLoads?.Cancel(); storeImageLoads?.Dispose(); storeImageLoads = null;
             lifetime.Dispose();
-        };
+        }
+        base.Dispose(disposing);
     }
 
     public async Task ActivatePageAsync()
@@ -216,9 +256,11 @@ public sealed class StorePreviewControl : UserControl
         if (IsDisposed) return;
         try
         {
+            // Start both synchronous loading phases before yielding to the message loop.
+            var storeTask = riot.HasAccountSession && (storefront is null || RemainingSeconds(storefront.DailySkins.RemainingSeconds) == 0)
+                ? LoadStorefrontAsync() : Task.CompletedTask;
             if (!catalogLoaded) await LoadCatalogAsync(refresh: false);
-            if (riot.HasAccountSession && (storefront is null || RemainingSeconds(storefront.DailySkins.RemainingSeconds) == 0))
-                await LoadStorefrontAsync();
+            await storeTask;
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         catch (Exception ex)
@@ -229,6 +271,31 @@ public sealed class StorePreviewControl : UserControl
     }
 
     internal void ReportActivationError(string message) => SetStatus(message, true);
+
+    /// <summary>F5 from the shell: refreshes whichever list is on screen, using the same buttons' rules.</summary>
+    public async Task RefreshFromShortcutAsync()
+    {
+        if (IsDisposed || !Visible) return;
+        try
+        {
+            if (catalogTab.Selected) { if (refreshCatalogButton.Enabled) await LoadCatalogAsync(refresh: true); }
+            else if (refreshStoreButton.Enabled) await LoadStorefrontAsync(force: true);
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    // Run after the page receives its final host bounds, before its first paint.
+    internal void PreparePageLayout()
+    {
+        Controls.OfType<TableLayoutPanel>().FirstOrDefault()?.PerformLayout();
+        storePage.Parent?.PerformLayout();
+        if (storePage.Visible)
+        {
+            storePage.PerformLayout();
+            LayoutStoreGrids();
+        }
+    }
 
     internal void ShowCatalogForPreview() => ShowCatalogPage();
 
@@ -292,38 +359,66 @@ public sealed class StorePreviewControl : UserControl
 
     private void BuildInterface()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = Theme.Background, Padding = new Padding(12, 8, 12, 8), Margin = Padding.Empty };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = Theme.Background, Padding = Padding.Empty, Margin = Padding.Empty };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 78));
-        var navigationRow = new RowStyle(SizeType.Absolute, 42);
+        var headerRow = new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 90));
+        root.RowStyles.Add(headerRow);
+        var statusRowStyle = new RowStyle(SizeType.Absolute, 0);
+        root.RowStyles.Add(statusRowStyle);
+        var navigationRow = new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 40));
         root.RowStyles.Add(navigationRow);
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 21));
-        root.Controls.Add(BuildHeader(), 0, 0);
-        root.Controls.Add(BuildNavigation(navigationRow), 0, 1);
-        root.Controls.Add(BuildPages(), 0, 2);
+        root.Controls.Add(BuildHeader(headerRow), 0, 0);
+        root.Controls.Add(BuildNavigation(navigationRow), 0, 2);
         var statusRow = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Background, Margin = Padding.Empty };
         statusLabel.Dock = DockStyle.Fill;
+        // Fill is added first so the Left-docked spinner claims its edge before the label fills the rest.
         statusRow.Controls.Add(statusLabel);
-        root.Controls.Add(statusRow, 0, 3);
+        statusRow.Controls.Add(statusSpinner);
+        root.Controls.Add(statusRow, 0, 1);
+        root.Controls.Add(BuildPages(), 0, 3);
+        void ResizeStatusRow()
+        {
+            var show = !string.IsNullOrWhiteSpace(statusLabel.Text);
+            var height = show ? NativePageStyle.TextHeight(statusLabel, statusLabel.Font, verticalPadding: UiMetrics.ControlGap) : 0;
+            if (Math.Abs(statusRowStyle.Height - height) >= .5f) statusRowStyle.Height = height;
+            statusRow.Visible = show;
+        }
+        statusLabel.TextChanged += (_, _) => ResizeStatusRow();
+        statusLabel.FontChanged += (_, _) => ResizeStatusRow();
+        root.DpiChangedAfterParent += (_, _) => ResizeStatusRow();
+        root.Layout += (_, _) => ResizeStatusRow();
         Controls.Add(root);
-
+        ResizeStatusRow();
     }
 
-    private Control BuildHeader()
+    private Control BuildHeader(RowStyle row)
     {
         var header = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Background, Margin = Padding.Empty };
         var title = NativePageStyle.Label("STORE  /  今日のラインナップ", NativePageStyle.Heading);
-        var counts = new FlowLayoutPanel { AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, Anchor = AnchorStyles.Top | AnchorStyles.Right, BackColor = Theme.Background, Margin = Padding.Empty };
-        counts.Controls.Add(CountBlock(skinCountLabel, "武器スキン"));
-        counts.Controls.Add(CountBlock(chromaCountLabel, "カラー"));
-        counts.Controls.Add(CountBlock(videoCountLabel, "動画"));
+        var counts = new RoundedCard { Margin = Padding.Empty, Padding = Padding.Empty, AccessibleName = "カタログの収録件数" };
+        var blocks = new[] { CountBlock(skinCountLabel, "武器スキン"), CountBlock(chromaCountLabel, "カラー"), CountBlock(videoCountLabel, "動画") };
+        counts.Controls.AddRange(blocks);
         header.Controls.Add(title); header.Controls.Add(counts);
         void Place()
         {
             var s = new Func<int, int>(value => UiMetrics.Px(header, value));
-            title.Bounds = new Rectangle(0, s(16), Math.Max(0, header.ClientSize.Width - counts.Width - s(20)), NativePageStyle.TextHeight(header, title.Font, verticalPadding: 8));
-            counts.Location = new Point(Math.Max(0, header.ClientSize.Width - counts.Width), s(10));
+            var inset = s(UiMetrics.ControlGap);
+            var blockHeight = blocks.Max(block => block.Height);
+            var cardHeight = blockHeight + inset * 2;
+            var cardWidth = s(360);
+            var headerHeight = cardHeight + s(UiMetrics.ControlGap);
+            if (row.Height != headerHeight) row.Height = headerHeight;
+            counts.Bounds = new Rectangle(Math.Max(0, header.ClientSize.Width - cardWidth), 0, cardWidth, cardHeight);
+            var innerWidth = Math.Max(0, counts.ClientSize.Width - inset * 2);
+            for (var i = 0; i < blocks.Length; i++)
+            {
+                var left = inset + innerWidth * i / blocks.Length;
+                var right = inset + innerWidth * (i + 1) / blocks.Length;
+                blocks[i].Bounds = new Rectangle(left, inset, right - left, blockHeight);
+            }
+            var titleHeight = NativePageStyle.TextHeight(header, title.Font, verticalPadding: UiMetrics.ControlGap);
+            title.Bounds = new Rectangle(0, Math.Max(0, (header.ClientSize.Height - titleHeight) / 2), Math.Max(0, header.ClientSize.Width - counts.Width - s(UiMetrics.ContentGap)), titleHeight);
         }
         header.Resize += (_, _) => Place();
         Place();
@@ -332,7 +427,7 @@ public sealed class StorePreviewControl : UserControl
 
     private static Control CountBlock(Label value, string caption)
     {
-        var block = new Panel { Width = 112, Height = 64, BackColor = Theme.Background, Margin = new Padding(4, 0, 4, 0) };
+        var block = new Panel { Width = 112, Height = 64, BackColor = Theme.Surface, Margin = Padding.Empty };
         var text = NativePageStyle.Label(caption, NativePageStyle.Small, Theme.Muted);
         text.AutoSize = false;
         text.AutoEllipsis = false;
@@ -347,6 +442,7 @@ public sealed class StorePreviewControl : UserControl
             text.Bounds = new Rectangle(0, valueHeight, block.ClientSize.Width, labelHeight);
         }
         block.DpiChangedAfterParent += (_, _) => Place();
+        block.Resize += (_, _) => Place();
         Place();
         return block;
     }
@@ -354,49 +450,65 @@ public sealed class StorePreviewControl : UserControl
     private Control BuildNavigation(RowStyle row)
     {
         var bar = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Background, Margin = Padding.Empty };
+        storeTab.Size = new Size(UiMetrics.Px(this, 180), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        catalogTab.Size = new Size(UiMetrics.Px(this, 168), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        loginButton.Size = new Size(UiMetrics.Px(this, 162), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        logoutButton.Size = new Size(UiMetrics.Px(this, 122), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        refreshStoreButton.Size = new Size(UiMetrics.Px(this, 204), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        refreshCatalogButton.Size = new Size(UiMetrics.Px(this, 150), UiMetrics.Px(this, UiMetrics.ButtonHeight));
         var tabs = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Background, Margin = Padding.Empty, Padding = Padding.Empty };
-        storeTab.Margin = Padding.Empty; catalogTab.Margin = new Padding(7, 0, 0, 0);
+        storeTab.Margin = Padding.Empty; catalogTab.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
         tabs.Controls.Add(storeTab); tabs.Controls.Add(catalogTab);
         var actions = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Background, Margin = Padding.Empty, Padding = Padding.Empty };
         accountLabel.AutoSize = true;
         accountLabel.AutoEllipsis = false;
         accountLabel.UseMnemonic = false;
-        accountLabel.Margin = new Padding(0, 0, 12, 0);
-        refreshStoreButton.Margin = new Padding(0, 0, 6, 0);
-        refreshCatalogButton.Margin = new Padding(0, 0, 6, 0);
-        loginButton.Margin = new Padding(0, 0, 6, 0);
-        logoutButton.Margin = Padding.Empty;
         actions.Controls.Add(accountLabel); actions.Controls.Add(refreshStoreButton); actions.Controls.Add(refreshCatalogButton);
         actions.Controls.Add(loginButton); actions.Controls.Add(logoutButton);
         bar.Controls.Add(tabs); bar.Controls.Add(actions);
 
-        var relayoutQueued = false;
+        var placing = false;
+        var placeAgain = false;
         void Place()
         {
+            if (placing) { placeAgain = true; return; }
             if (bar.ClientSize.Width <= 1) return;
-            var gap = UiMetrics.Px(bar, 8);
-            var stacked = tabs.Width + gap + actions.Width > bar.ClientSize.Width;
-            var contentHeight = stacked ? tabs.Height + gap + actions.Height : Math.Max(tabs.Height, actions.Height);
-            var height = contentHeight + UiMetrics.Px(bar, 12);
-            tabs.Location = new Point(0, stacked ? 0 : (contentHeight - tabs.Height) / 2);
-            actions.Location = new Point(Math.Max(0, bar.ClientSize.Width - actions.Width),
-                stacked ? tabs.Height + gap : (contentHeight - actions.Height) / 2);
-            if (row.Height != height) row.Height = height;
-            // A resize during the table's own layout needs a follow-up pass to apply the new row height.
-            if (bar.Height != height && bar.IsHandleCreated && !relayoutQueued)
+            placing = true;
+            try
             {
-                relayoutQueued = true;
-                bar.BeginInvoke(() =>
+                do
                 {
-                    relayoutQueued = false;
-                    if (!bar.IsDisposed) bar.Parent?.PerformLayout();
-                });
+                    placeAgain = false;
+                    var gap = UiMetrics.Px(bar, UiMetrics.ControlGap);
+                    // Use the same physical gap between the tabs and beneath them.
+                    if (catalogTab.Margin.Left != gap) catalogTab.Margin = new Padding(gap, 0, 0, 0);
+                    var first = true;
+                    foreach (Control action in actions.Controls)
+                    {
+                        var margin = new Padding(action.Visible && !first ? gap : 0, 0, 0, 0);
+                        if (action.Margin != margin) action.Margin = margin;
+                        if (action.Visible) first = false;
+                    }
+                    actions.PerformLayout();
+                    tabs.PerformLayout();
+                    var stacked = tabs.Width + gap + actions.Width > bar.ClientSize.Width;
+                    var contentHeight = stacked ? tabs.Height + gap + actions.Height : Math.Max(tabs.Height, actions.Height);
+                    var height = contentHeight + gap;
+                    tabs.Location = new Point(0, stacked ? actions.Height + gap : (contentHeight - tabs.Height) / 2);
+                    actions.Location = new Point(Math.Max(0, bar.ClientSize.Width - actions.Width),
+                        stacked ? 0 : (contentHeight - actions.Height) / 2);
+                    if (row.Height != height) row.Height = height;
+                    if (bar.Height != height) bar.Parent?.PerformLayout();
+                } while (placeAgain);
             }
+            finally { placing = false; }
         }
 
         bar.SizeChanged += (_, _) => Place();
+        bar.VisibleChanged += (_, _) => { if (bar.Visible) Place(); };
         tabs.SizeChanged += (_, _) => Place();
         actions.SizeChanged += (_, _) => Place();
+        foreach (Control action in actions.Controls) action.VisibleChanged += (_, _) => Place();
         return bar;
     }
 
@@ -413,19 +525,23 @@ public sealed class StorePreviewControl : UserControl
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = Theme.Background, Margin = Padding.Empty };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        var tabsRow = new RowStyle(SizeType.Absolute, 52);
+        var tabsRow = new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 50));
         layout.RowStyles.Add(tabsRow);
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var tabs = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, BackColor = Theme.Background, Margin = Padding.Empty, Padding = Padding.Empty };
-        dailySectionTab.Margin = new Padding(0, 0, 6, 0);
-        nightSectionTab.Margin = new Padding(0, 0, 6, 0);
-        bundleSectionTab.Margin = new Padding(0, 0, 6, 0);
+        dailySectionTab.Size = new Size(UiMetrics.Px(this, 132), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        nightSectionTab.Size = new Size(UiMetrics.Px(this, 176), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        bundleSectionTab.Size = new Size(UiMetrics.Px(this, 150), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        accessorySectionTab.Size = new Size(UiMetrics.Px(this, 142), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        dailySectionTab.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
+        nightSectionTab.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
+        bundleSectionTab.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
         accessorySectionTab.Margin = Padding.Empty;
         tabs.Controls.Add(dailySectionTab); tabs.Controls.Add(nightSectionTab); tabs.Controls.Add(bundleSectionTab); tabs.Controls.Add(accessorySectionTab);
         void SizeTabs()
         {
             var height = tabs.Controls.Cast<Control>().Where(control => control.Visible)
-                .Select(control => control.Height + control.Margin.Vertical).DefaultIfEmpty(dailySectionTab.Height).Max() + UiMetrics.Px(tabs, 12);
+                .Select(control => control.Height + control.Margin.Vertical).DefaultIfEmpty(dailySectionTab.Height).Max() + UiMetrics.Px(tabs, UiMetrics.ControlGap);
             if (tabsRow.Height != height) tabsRow.Height = height;
         }
         tabs.SizeChanged += (_, _) => SizeTabs();
@@ -463,11 +579,13 @@ public sealed class StorePreviewControl : UserControl
     private Panel CreateSection(string title, Label timer, out Panel body)
     {
         var card = NativePageStyle.Card();
-        card.Dock = DockStyle.Fill; card.Margin = new Padding(3); card.Padding = new Padding(12, 8, 12, 8);
-        var header = new Panel { Dock = DockStyle.Top, Height = 32, BackColor = Theme.Surface };
-        var name = NativePageStyle.Label(title, NativePageStyle.SmallBold, Theme.Muted); name.Dock = DockStyle.Left; name.Width = 360;
-        var timerCaption = NativePageStyle.Label("次回更新  ", NativePageStyle.Small, Theme.Muted); timerCaption.Dock = DockStyle.Right; timerCaption.Width = 90; timerCaption.TextAlign = ContentAlignment.MiddleRight;
-        timer.Dock = DockStyle.Right; timer.Width = 90; timer.TextAlign = ContentAlignment.MiddleRight;
+        card.Dock = DockStyle.Fill;
+        card.Margin = Padding.Empty;
+        card.Padding = new Padding(UiMetrics.Px(this, UiMetrics.ContentGap));
+        var header = new Panel { Dock = DockStyle.Top, Height = UiMetrics.Px(this, 32), BackColor = Theme.Surface };
+        var name = NativePageStyle.Label(title, NativePageStyle.SmallBold, Theme.Muted); name.Dock = DockStyle.Fill;
+        var timerCaption = NativePageStyle.Label("次回更新  ", NativePageStyle.Small, Theme.Muted); timerCaption.Dock = DockStyle.Right; timerCaption.Width = UiMetrics.Px(this, 90); timerCaption.TextAlign = ContentAlignment.MiddleRight;
+        timer.Dock = DockStyle.Right; timer.Width = UiMetrics.Px(this, 90); timer.TextAlign = ContentAlignment.MiddleRight;
         header.Controls.Add(timerCaption); header.Controls.Add(timer); header.Controls.Add(name);
         body = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Padding = new Padding(0, 8, 0, 0) };
         card.Controls.Add(body); card.Controls.Add(header);
@@ -477,31 +595,36 @@ public sealed class StorePreviewControl : UserControl
     private void BuildCatalogPage()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = Theme.Background, Margin = Padding.Empty };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54)); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, BackColor = Theme.Background, Padding = new Padding(0, 3, 0, 5), Margin = Padding.Empty };
-        searchBox.Width = 270; searchBox.Height = 38; searchBox.Margin = new Padding(0, 2, 8, 0);
-        categorySelect.Width = 230; categorySelect.Height = 38; categorySelect.Margin = new Padding(0, 2, 8, 0);
-        weaponSelect.Width = 210; weaponSelect.Height = 38; weaponSelect.Margin = new Padding(0, 2, 8, 0);
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, UiMetrics.ButtonHeight + UiMetrics.ControlGap))); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, BackColor = Theme.Background,
+            Padding = new Padding(0, 0, 0, UiMetrics.Px(this, UiMetrics.ControlGap)), Margin = Padding.Empty };
+        searchBox.Width = UiMetrics.Px(this, 270); searchBox.Height = UiMetrics.Px(this, UiMetrics.ButtonHeight); searchBox.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
+        categorySelect.Width = UiMetrics.Px(this, 230); categorySelect.Height = UiMetrics.Px(this, UiMetrics.ButtonHeight); categorySelect.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
+        weaponSelect.Width = UiMetrics.Px(this, 210); weaponSelect.Height = UiMetrics.Px(this, UiMetrics.ButtonHeight); weaponSelect.Margin = Padding.Empty;
         toolbar.Controls.Add(searchBox); toolbar.Controls.Add(categorySelect); toolbar.Controls.Add(weaponSelect);
         layout.Controls.Add(toolbar, 0, 0);
 
         var split = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = Theme.Background, Margin = Padding.Empty };
-        split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 64)); split.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
-        var listCard = NativePageStyle.Card(); listCard.Margin = new Padding(3); listCard.Padding = new Padding(8);
-        var pageFooter = new Panel { Dock = DockStyle.Bottom, Height = 40, BackColor = Theme.Surface };
-        previousCatalogPage.Size = new Size(92, 34);
-        nextCatalogPage.Size = new Size(92, 34);
-        previousCatalogPage.Location = new Point(0, 2);
+        split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0)); split.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
+        var listCard = NativePageStyle.Card();
+        listCard.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ContentGap), 0);
+        listCard.Padding = new Padding(UiMetrics.Px(this, UiMetrics.ContentGap));
+        catalogGrid.Padding = new Padding(UiMetrics.Px(this, UiMetrics.TightGap));
+        var pageFooter = new Panel { Dock = DockStyle.Bottom, Height = UiMetrics.Px(this, 45), BackColor = Theme.Surface };
+        previousCatalogPage.Size = new Size(UiMetrics.Px(this, 92), UiMetrics.Px(this, UiMetrics.CompactButtonHeight));
+        nextCatalogPage.Size = previousCatalogPage.Size;
+        previousCatalogPage.Location = new Point(0, UiMetrics.Px(this, UiMetrics.TightGap));
         nextCatalogPage.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         catalogPageLabel.TextAlign = ContentAlignment.MiddleCenter;
         catalogPageLabel.Dock = DockStyle.None;
         void PlacePageFooter()
         {
-            previousCatalogPage.Size = nextCatalogPage.Size = new Size(UiMetrics.Px(this, 92), UiMetrics.Px(this, 34));
-            previousCatalogPage.Location = new Point(0, UiMetrics.Px(this, 2));
-            nextCatalogPage.Location = new Point(Math.Max(0, pageFooter.ClientSize.Width - nextCatalogPage.Width), UiMetrics.Px(this, 2));
-            catalogPageLabel.Bounds = new Rectangle(previousCatalogPage.Right + UiMetrics.Px(this, 6), 0,
-                Math.Max(0, nextCatalogPage.Left - previousCatalogPage.Right - UiMetrics.Px(this, 12)), pageFooter.ClientSize.Height);
+            var gap = UiMetrics.Px(this, UiMetrics.ControlGap);
+            previousCatalogPage.Size = nextCatalogPage.Size = new Size(UiMetrics.Px(this, 92), UiMetrics.Px(this, UiMetrics.CompactButtonHeight));
+            previousCatalogPage.Location = new Point(0, UiMetrics.Px(this, UiMetrics.TightGap));
+            nextCatalogPage.Location = new Point(Math.Max(0, pageFooter.ClientSize.Width - nextCatalogPage.Width), UiMetrics.Px(this, UiMetrics.TightGap));
+            catalogPageLabel.Bounds = new Rectangle(previousCatalogPage.Right + gap, 0,
+                Math.Max(0, nextCatalogPage.Left - previousCatalogPage.Right - gap * 2), pageFooter.ClientSize.Height);
         }
         pageFooter.Resize += (_, _) => PlacePageFooter();
         PlacePageFooter();
@@ -512,51 +635,138 @@ public sealed class StorePreviewControl : UserControl
         listCard.Controls.Add(catalogGridHost);
         listCard.Controls.Add(pageFooter);
         split.Controls.Add(listCard, 0, 0);
-        split.Controls.Add(BuildPreviewPanel(), 1, 0);
+        previewPanel = BuildPreviewPanel();
+        split.Controls.Add(previewPanel, 1, 0);
+        void ArrangeCatalogSplit()
+        {
+            if (split.ClientSize.Width <= 0) return;
+            var previewWidth = Math.Clamp((int)Math.Round(split.ClientSize.Width * .36), UiMetrics.Px(this, 380), UiMetrics.Px(this, 560));
+            var listCellWidth = Math.Max(0, split.ClientSize.Width - previewWidth);
+            var listColumn = split.ColumnStyles[0];
+            var previewColumn = split.ColumnStyles[1];
+            if (listColumn.Width != listCellWidth) { listColumn.SizeType = SizeType.Absolute; listColumn.Width = listCellWidth; }
+            if (previewColumn.Width != previewWidth) { previewColumn.SizeType = SizeType.Absolute; previewColumn.Width = previewWidth; }
+        }
+        split.SizeChanged += (_, _) => ArrangeCatalogSplit();
+        split.Layout += (_, _) => ArrangeCatalogSplit();
+        ArrangeCatalogSplit();
         layout.Controls.Add(split, 0, 1);
         catalogPage.Controls.Add(layout);
         catalogGrid.SizeChanged += (_, _) =>
         {
-            if (!catalogPage.Visible) return;
+            if (!catalogPage.Visible || switchingCatalogPage) return;
             if (catalogLoaded) UpdateCatalogPageSize();
             else RenderCatalogGrid();
         };
+        catalogGrid.MouseWheel += CatalogMouseWheel;
+        catalogGridHost.MouseWheel += CatalogMouseWheel;
         previousCatalogPage.Click += (_, _) => { if (catalogPageIndex > 0) { catalogPageIndex--; RenderCatalogGrid(); } };
         nextCatalogPage.Click += (_, _) => { catalogPageIndex++; RenderCatalogGrid(); };
     }
 
     private Control BuildPreviewPanel()
     {
-        var panel = NativePageStyle.Card(); panel.Margin = new Padding(3); panel.Padding = new Padding(12);
+        var panel = NativePageStyle.Card();
+        panel.Margin = Padding.Empty;
+        panel.Padding = new Padding(UiMetrics.Px(this, UiMetrics.CardInset));
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 8, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = Padding.Empty };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 70)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 45)));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 24));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 25)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 35)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 25)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 35)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 30)));
         var header = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
+        var mediaBar = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
         catalogTitle.AutoSize = false;
         catalogMeta.AutoSize = false;
-        catalogTitle.AutoEllipsis = false;
-        catalogMeta.AutoEllipsis = false;
+        catalogTitle.AutoEllipsis = true;
+        catalogMeta.AutoEllipsis = true;
+        playVideoButton.Margin = playbackButton.Margin = muteVideoButton.Margin = stopVideoButton.Margin = Padding.Empty;
+        mediaBar.Controls.Add(playVideoButton); mediaBar.Controls.Add(playbackButton);
+        mediaBar.Controls.Add(muteVideoButton); mediaBar.Controls.Add(stopVideoButton);
         header.Controls.Add(catalogTitle); header.Controls.Add(catalogMeta);
-        header.Resize += (_, _) => { catalogTitle.Bounds = new Rectangle(0, 0, Math.Max(UiMetrics.Px(header, 100), header.ClientSize.Width), UiMetrics.Px(header, 44)); catalogMeta.Bounds = new Rectangle(UiMetrics.Px(header, 1), UiMetrics.Px(header, 45), Math.Max(UiMetrics.Px(header, 100), header.ClientSize.Width), UiMetrics.Px(header, 22)); };
-        var mediaActions = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, BackColor = Theme.Surface, Margin = Padding.Empty };
-        playVideoButton.Margin = new Padding(0, 0, 6, 0); stopVideoButton.Margin = Padding.Empty;
-        mediaActions.Controls.Add(playVideoButton); mediaActions.Controls.Add(stopVideoButton);
+        var labelFont = SharedFonts.Get("Yu Gothic UI", 11.5f, FontStyle.Bold);
+        var iconFont = SharedFonts.Get("Segoe MDL2 Assets", 14f);
+        const TextFormatFlags measureFlags = TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+        void ApplyMediaButton(ThemedButton button, bool iconOnly, string glyph, string text, string accessibleName, string tip)
+        {
+            button.Font = iconOnly ? iconFont : labelFont;
+            button.Text = iconOnly ? glyph : text;
+            button.AccessibleName = accessibleName;
+            button.AccessibleDescription = tip;
+            mediaToolTips.SetToolTip(button, tip);
+        }
+        void PlaceHeader()
+        {
+            var s = new Func<int, int>(value => UiMetrics.Px(header, value));
+            catalogTitle.Bounds = new Rectangle(0, 0, header.ClientSize.Width, s(40));
+            catalogMeta.Bounds = new Rectangle(s(UiMetrics.TightGap), s(43), header.ClientSize.Width - s(UiMetrics.TightGap), s(22));
+        }
+        void PlaceMediaActions()
+        {
+            var width = mediaBar.ClientSize.Width;
+            if (width <= 0) return;
+            var labelWidth = new[] { "▶ 再生", "⏸ 一時停止", "音声をオン", "ミュート", "画像に戻る", "キャンセル" }
+                .Max(text => TextRenderer.MeasureText(text, labelFont, Size.Empty, measureFlags).Width)
+                + UiMetrics.Px(mediaBar, UiMetrics.ControlGap) * 2;
+            var s = new Func<int, int>(value => UiMetrics.Px(mediaBar, value));
+            var iconWidth = s(35);
+            var buttonHeight = s(UiMetrics.CompactButtonHeight);
+            var gap = s(UiMetrics.ControlGap);
+            var groupGap = s(UiMetrics.PageInset);
+            var stage0 = labelWidth * 3 + gap + groupGap;
+            var stage1 = labelWidth * 2 + iconWidth + gap + groupGap;
+            var stage2 = labelWidth + iconWidth * 2 + gap + groupGap;
+            var iconStage = width >= stage0 ? 0 : width >= stage1 ? 1 : width >= stage2 ? 2 : 3;
+            var playbackIcon = iconStage >= 2;
+            var audioIcon = iconStage >= 1;
+            var stopIcon = iconStage >= 3;
+            var playAction = "選択中スキンの動画を再生";
+            var playbackAction = videoPaused ? "動画を再生" : "動画を一時停止";
+            var audioAction = mediaPlayer.IsMuted ? "動画の音声をオン" : "動画をミュート";
+            var cancelingVideo = videoOpening || videoLoad is { IsCancellationRequested: false };
+            var stopAction = cancelingVideo ? "動画の読み込みをキャンセル" : "プレビュー画像に戻る";
+            ApplyMediaButton(playVideoButton, playbackIcon, "\uE768", "▶ 再生", playAction, playAction);
+            ApplyMediaButton(playbackButton, playbackIcon, videoPaused ? "\uE768" : "\uE769", videoPaused ? "▶ 再生" : "⏸ 一時停止", playbackAction, playbackAction);
+            ApplyMediaButton(muteVideoButton, audioIcon, mediaPlayer.IsMuted ? "\uE767" : "\uE74F", mediaPlayer.IsMuted ? "音声をオン" : "ミュート", audioAction, audioAction);
+            ApplyMediaButton(stopVideoButton, stopIcon, cancelingVideo ? "\uE711" : "\uE91B", cancelingVideo ? "キャンセル" : "画像に戻る", stopAction, stopAction);
+            playVideoButton.Enabled = !string.IsNullOrWhiteSpace(playVideoButton.Tag as string);
+
+            var playWidth = playbackIcon ? iconWidth : labelWidth;
+            var audioWidth = audioIcon ? iconWidth : labelWidth;
+            var stopWidth = stopIcon ? iconWidth : labelWidth;
+            const int left = 0;
+            var y = Math.Max(0, (mediaBar.ClientSize.Height - buttonHeight) / 2);
+            playVideoButton.Bounds = new Rectangle(left, y, playWidth, buttonHeight);
+            playbackButton.Bounds = playVideoButton.Bounds;
+            muteVideoButton.Bounds = new Rectangle(left + playWidth + gap, y, audioWidth, buttonHeight);
+            var stopLeft = Math.Max(left + playWidth + gap + audioWidth + groupGap, width - stopWidth);
+            stopVideoButton.Bounds = new Rectangle(stopLeft, y, stopWidth, buttonHeight);
+        }
+        header.Resize += (_, _) => PlaceHeader();
+        mediaBar.Resize += (_, _) => PlaceMediaActions();
+        playVideoButton.VisibleChanged += (_, _) => PlaceMediaActions();
+        playbackButton.VisibleChanged += (_, _) => PlaceMediaActions();
+        muteVideoButton.VisibleChanged += (_, _) => PlaceMediaActions();
+        stopVideoButton.VisibleChanged += (_, _) => PlaceMediaActions();
+        header.DpiChangedAfterParent += (_, _) => PlaceHeader();
+        mediaBar.DpiChangedAfterParent += (_, _) => PlaceMediaActions();
+        resizeMediaActions = PlaceMediaActions;
+        PlaceHeader();
+        PlaceMediaActions();
         visualHost.Dock = DockStyle.Fill;
         visualHost.Controls.Add(previewImage); visualHost.Controls.Add(videoHost); visualHost.Controls.Add(videoLoadingOverlay);
         var chromaHeading = NativePageStyle.Label("COLOR VARIANTS", NativePageStyle.SmallBold, Theme.Muted); chromaHeading.Dock = DockStyle.Fill;
-        chromaOptions.Dock = DockStyle.Fill; chromaOptions.MinimumSize = new Size(0, 34); chromaOptions.AutoSize = false;
+        chromaOptions.Dock = DockStyle.Fill; chromaOptions.MinimumSize = new Size(0, UiMetrics.Px(this, UiMetrics.CompactButtonHeight)); chromaOptions.AutoSize = false;
         var levelHeading = NativePageStyle.Label("UPGRADE LEVELS", NativePageStyle.SmallBold, Theme.Muted); levelHeading.Dock = DockStyle.Fill;
-        levelOptions.Dock = DockStyle.Fill; levelOptions.MinimumSize = new Size(0, 34); levelOptions.AutoSize = false;
+        levelOptions.Dock = DockStyle.Fill; levelOptions.MinimumSize = new Size(0, UiMetrics.Px(this, UiMetrics.CompactButtonHeight)); levelOptions.AutoSize = false;
         previewMessage.Dock = DockStyle.Fill;
         layout.Controls.Add(header, 0, 0);
-        layout.Controls.Add(mediaActions, 0, 1);
+        layout.Controls.Add(mediaBar, 0, 1);
         layout.Controls.Add(visualHost, 0, 2);
         layout.Controls.Add(chromaHeading, 0, 3);
         layout.Controls.Add(chromaOptions, 0, 4);
@@ -571,7 +781,7 @@ public sealed class StorePreviewControl : UserControl
             layout.RowStyles[4].Height = OptionPanelHeight(chromaOptions);
             layout.RowStyles[6].Height = OptionPanelHeight(levelOptions);
             layout.RowStyles[7].Height = string.IsNullOrEmpty(previewMessage.Text)
-                ? 0 : NativePageStyle.TextHeight(panel, previewMessage.Font, verticalPadding: 6);
+                ? 0 : NativePageStyle.TextHeight(panel, previewMessage.Font, verticalPadding: UiMetrics.TightGap);
             layout.PerformLayout();
         }
         resizePreviewLayout = ResizePreview;
@@ -587,14 +797,31 @@ public sealed class StorePreviewControl : UserControl
     {
         var buttons = host.Controls.OfType<ThemedButton>().ToArray();
         if (buttons.Length == 0)
-            return Math.Max(UiMetrics.Px(this, 34), host.Controls.OfType<Label>()
-                .Select(label => NativePageStyle.TextHeight(this, label.Font, verticalPadding: 8))
-                .DefaultIfEmpty(UiMetrics.Px(this, 34)).Max());
+            return Math.Max(UiMetrics.Px(this, UiMetrics.CompactButtonHeight), host.Controls.OfType<Label>()
+                .Select(label => NativePageStyle.TextHeight(this, label.Font, verticalPadding: UiMetrics.ControlGap))
+                .DefaultIfEmpty(UiMetrics.Px(this, UiMetrics.CompactButtonHeight)).Max());
         var available = Math.Max(1, host.ClientSize.Width);
-        var columns = available >= UiMetrics.Px(this, 330) ? 3 : available >= UiMetrics.Px(this, 220) ? 2 : 1;
+        var columns = OptionColumns(host, available);
         var rowCount = (buttons.Length + columns - 1) / columns;
         var rowHeight = buttons.Max(button => button.Height + button.Margin.Vertical);
-        return rowCount * rowHeight + UiMetrics.Px(this, 2);
+        return rowCount * rowHeight + UiMetrics.Px(this, UiMetrics.TightGap);
+    }
+
+    // Compact option grid: all four chromas or all five levels fit on one row at typical panel widths.
+    private int OptionColumns(FlowLayoutPanel host, int available)
+    {
+        var maximum = ReferenceEquals(host, levelOptions) ? 5 : 4;
+        if (available >= UiMetrics.Px(this, 300)) return maximum;
+        if (available >= UiMetrics.Px(this, 220)) return Math.Min(maximum, 3);
+        return available >= UiMetrics.Px(this, 140) ? 2 : 1;
+    }
+
+    private Size OptionButtonSize(FlowLayoutPanel host, int available)
+    {
+        var columns = OptionColumns(host, available);
+        var margin = UiMetrics.Px(this, UiMetrics.TightGap) * 2;
+        var width = Math.Clamp((available - UiMetrics.Px(this, UiMetrics.ControlGap)) / columns - margin, UiMetrics.Px(this, 52), UiMetrics.Px(this, 148));
+        return new Size(width, UiMetrics.Px(this, UiMetrics.CompactButtonHeight));
     }
 
     private void WireEvents()
@@ -607,7 +834,7 @@ public sealed class StorePreviewControl : UserControl
         {
             if (shellAuthentication)
             {
-                SetStatus("SpikeSide上部のRiotログインから接続してください。", false);
+                SetStatus("ブラウザーが開いたらRiotにログインしてください。", false);
                 LoginRequested?.Invoke(this, EventArgs.Empty);
             }
             else await SignInAsync();
@@ -621,11 +848,22 @@ public sealed class StorePreviewControl : UserControl
         categorySelect.SelectedIndexChanged += (_, _) => { if (!changingFilters) { catalogPageIndex = 0; RenderCatalogGrid(); } };
         weaponSelect.SelectedIndexChanged += (_, _) => { if (!changingFilters) { catalogPageIndex = 0; RenderCatalogGrid(); } };
         playVideoButton.Click += async (_, _) => await PlayPreviewVideoAsync(lifetime.Token);
+        playbackButton.Click += (_, _) => ToggleVideoPlayback();
+        muteVideoButton.Click += (_, _) => ToggleVideoMute();
         stopVideoButton.Click += (_, _) => ShowPreviewImage();
         VisibleChanged += (_, _) =>
         {
-            if (Visible) LayoutStoreGrids();
-            else if (!Disposing && !IsDisposed) ShowPreviewImage();
+            if (Visible)
+            {
+                LayoutStoreGrids();
+                UpdateCountdowns();
+                countdownTimer.Start();
+            }
+            else
+            {
+                countdownTimer.Stop();
+                if (!Disposing && !IsDisposed) ShowPreviewImage();
+            }
         };
     }
 
@@ -637,19 +875,22 @@ public sealed class StorePreviewControl : UserControl
         dailyOffers.PerformLayout(); nightOffers.PerformLayout(); bundleCards.PerformLayout(); accessoryCards.PerformLayout();
     }
 
+    private bool switchingCatalogPage;
+
     private void ShowStoreSection(string key)
     {
         if (ActiveStoreSection() == key) return;
         var next = storeSections.Controls.Cast<Control>().FirstOrDefault(section => Equals(section.Tag, key));
         if (next is null) return;
+        using var redraw = PageRedrawScope.Begin(storeSections);
         next.BringToFront();
         next.Show();
         foreach (Control section in storeSections.Controls)
             if (section != next) section.Hide();
-        dailySectionTab.Primary = key == "daily";
-        nightSectionTab.Primary = key == "night";
-        bundleSectionTab.Primary = key == "bundle";
-        accessorySectionTab.Primary = key == "accessories";
+        dailySectionTab.Selected = key == "daily";
+        nightSectionTab.Selected = key == "night";
+        bundleSectionTab.Selected = key == "bundle";
+        accessorySectionTab.Selected = key == "accessories";
         LayoutStoreGrids();
     }
 
@@ -672,13 +913,16 @@ public sealed class StorePreviewControl : UserControl
         {
             catalogSnapshot = await catalog.LoadAsync(refresh, lifetime.Token);
             allSkins = catalogSnapshot.Weapons.SelectMany(w => w.Skins).ToArray();
-            catalogLoaded = true;
             catalogTextMetricsReady = false;
-            MeasureCatalogTextHeights();
+            catalogCardTitleHeight = catalogCardSubtitleHeight = 0;
+            catalogMetricsGeneration++;
+            await MeasureCatalogTextHeightsAsync();
+            if (IsDisposed || Disposing || lifetime.IsCancellationRequested) return;
             RebuildRewardIndex();
             UpdateCatalogCounts();
             RebuildFilterLists();
-            if (catalogTab.Primary) RenderCatalogGrid();
+            catalogLoaded = true;
+            if (catalogTab.Selected) RenderCatalogGrid();
             RenderStorefront();
             SetStatus("", false);
         }
@@ -687,13 +931,17 @@ public sealed class StorePreviewControl : UserControl
         {
             catalogLoadMessage = "武器カタログを読み込めませんでした。ネット接続を確認して再試行してください。";
             NativePageStyle.LogPageError("StoreCatalog", ex);
-            SetStatus(catalogLoadMessage, true);
+            if (!disposingStore && !IsDisposed && !Disposing) SetStatus(catalogLoadMessage, true);
         }
         finally
         {
             loadingCatalog = false;
-            refreshCatalogButton.Enabled = true;
-            if (!catalogLoaded) RenderCatalogGrid();
+            if (!disposingStore && !IsDisposed && !Disposing)
+            {
+                EndProgress(refresh ? "カタログを更新しています…" : "カタログを読み込んでいます…");
+                refreshCatalogButton.Enabled = true;
+                if (!catalogLoaded) RenderCatalogGrid();
+            }
         }
     }
 
@@ -703,6 +951,7 @@ public sealed class StorePreviewControl : UserControl
         {
             storefront = null;
             RenderStorefront();
+            UpdateAccountState();
             SetStatus("先にRiotアカウントへ接続してください。", true);
             return;
         }
@@ -728,30 +977,31 @@ public sealed class StorePreviewControl : UserControl
         catch (OperationCanceledException) when (operation.IsCancellationRequested) { }
         catch (OperationCanceledException)
         {
-            if (generation == storeGeneration) SetStatus("今日のショップの取得がタイムアウトしました。再度更新してください。", true);
+            if (generation == storeGeneration && !IsDisposed && !Disposing) SetStatus("今日のショップの取得がタイムアウトしました。再度更新してください。", true);
         }
         catch (ApiException ex) when (ex.Status == 429)
         {
-            if (generation == storeGeneration) SetStatus("ショップの更新が集中しています。少し待ってから再試行してください。", true);
+            if (generation == storeGeneration && !IsDisposed && !Disposing) SetStatus("ショップの更新が集中しています。少し待ってから再試行してください。", true);
         }
         catch (Exception ex) when (ex is ApiException or HttpRequestException or InvalidDataException or JsonException or InvalidOperationException)
         {
             NativePageStyle.LogPageError("Storefront", ex);
-            if (generation == storeGeneration) SetStatus("今日のショップを取得できませんでした。VALORANTのアカウント接続を確認してください。", true);
+            if (generation == storeGeneration && !IsDisposed && !Disposing) SetStatus("今日のショップを取得できませんでした。VALORANTのアカウント接続を確認してください。", true);
         }
-        catch (Exception ex) when (generation == storeGeneration)
+        catch (Exception ex)
         {
             NativePageStyle.LogPageError("Storefront", ex);
-            SetStatus("今日のショップを表示できませんでした。再度更新してください。", true);
+            if (generation == storeGeneration && !IsDisposed && !Disposing) SetStatus("今日のショップを表示できませんでした。再度更新してください。", true);
         }
         finally
         {
             if (ReferenceEquals(activeStoreLoad, operation)) activeStoreLoad = null;
-            if (generation == storeGeneration)
+            if (generation == storeGeneration && !disposingStore && !IsDisposed && !Disposing)
             {
                 loadingStore = false;
                 refreshStoreButton.Enabled = true;
                 EndProgress(progressMessage);
+                UpdateAccountState();
                 if (storefront is null) RenderStorefront();
             }
         }
@@ -784,9 +1034,13 @@ public sealed class StorePreviewControl : UserControl
     private void UpdateAccountState()
     {
         accountLabel.Text = riot.HasAccountSession
-            ? $"{riot.AccountName}\n{riot.RegionLabel}"
-            : shellAuthentication ? "SpikeSideのログインから接続" : "Riotアカウント未接続";
-        loginButton.Visible = !shellAuthentication && !riot.HasAccountSession;
+            ? shellAuthentication ? $"接続地域 · {riot.RegionLabel}" : $"{riot.AccountName}\n{riot.RegionLabel}"
+            : shellAuthentication ? "" : "Riotアカウント未接続";
+        // Inside the app shell the header already shows the account and logout, so this page only adds a
+        // direct login while signed out (the shell runs the login) instead of pointing at the header.
+        accountLabel.Visible = !shellAuthentication || riot.HasAccountSession;
+        loginButton.Visible = !riot.HasAccountSession;
+        loginButton.Primary = !riot.HasAccountSession;
         logoutButton.Visible = !shellAuthentication && riot.HasAccountSession;
         refreshStoreButton.Enabled = riot.HasAccountSession && !loadingStore;
     }
@@ -794,7 +1048,14 @@ public sealed class StorePreviewControl : UserControl
     private void RenderStorefront()
     {
         if (IsDisposed || Disposing) return;
+        UpdateCountdowns();
+        using var redraw = PageRedrawScope.Begin(storePage);
+        var grids = new[] { dailyOffers, nightOffers, bundleCards, accessoryCards };
+        foreach (var grid in grids) grid.SuspendLayout();
+        try
+        {
         DisposeFlowChildren(dailyOffers); DisposeFlowChildren(nightOffers); DisposeFlowChildren(bundleCards); DisposeFlowChildren(accessoryCards);
+        bundleDetails.Clear();
         // Stale card images are cancelled when their cards are replaced.
         storeImageLoads?.Cancel(); storeImageLoads?.Dispose();
         storeImageLoads = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -805,11 +1066,9 @@ public sealed class StorePreviewControl : UserControl
             if (dailySkeleton.Loading) return;
             dailyOffers.Controls.Add(CreateEmptyMessage(riot.HasAccountSession
                 ? "今日のショップを取得できませんでした。更新して再試行してください。"
-                : shellAuthentication ? "SpikeSide上部のRiotログインから接続してください。" : "Riotアカウントに接続すると、今日のショップを表示します。", 500, 110));
+                : shellAuthentication ? "Riotアカウントにログインすると、今日のショップを表示します。" : "Riotアカウントに接続すると、今日のショップを表示します。", 500, 110));
             return;
         }
-
-        dailySkeleton.Loading = false;
 
         foreach (var offer in storefront.DailySkins.Offers) dailyOffers.Controls.Add(CreateOfferCard(offer, night: false));
         if (storefront.DailySkins.Offers.Count == 0) dailyOffers.Controls.Add(CreateEmptyMessage("今日の武器オファーはありません。", 240, 110));
@@ -825,6 +1084,9 @@ public sealed class StorePreviewControl : UserControl
         SetSectionVisibility("accessories", storefront.Accessories.Offers.Count > 0);
         foreach (var accessory in storefront.Accessories.Offers) accessoryCards.Controls.Add(CreateAccessoryCard(accessory));
         LayoutStoreGrids();
+        dailySkeleton.Loading = false;
+        }
+        finally { foreach (var grid in grids) grid.ResumeLayout(true); }
     }
 
     private Control CreateOfferCard(StorefrontOffer offer, bool night)
@@ -836,7 +1098,28 @@ public sealed class StorePreviewControl : UserControl
         var titleText = skin?.Name ?? ItemTypeName(offer.ItemTypeId);
         var title = NativePageStyle.Label(titleText, NativePageStyle.BodyBold);
         title.AutoSize = false; title.AutoEllipsis = false; title.Dock = DockStyle.Top;
-        title.Padding = new Padding(0, 0, night ? UiMetrics.Px(this, 58) : 0, 0);
+        var discountPercent = night ? offer.DiscountPercent : null;
+        title.Padding = new Padding(0, 0, discountPercent is not null ? UiMetrics.Px(this, 58) : 0, 0);
+        // The badge lives inside the title label's reserved right padding, so it stays in the title row.
+        Label? discountLabel = null;
+        if (discountPercent is { } discount)
+        {
+            discountLabel = NativePageStyle.Label($"−{discount:0}%", NativePageStyle.SmallBold, Theme.Red);
+            discountLabel.AutoEllipsis = false;
+            discountLabel.AutoSize = false;
+            discountLabel.TextAlign = ContentAlignment.TopRight;
+            discountLabel.Cursor = Cursors.Hand;
+            title.Controls.Add(discountLabel);
+            var badge = discountLabel;
+            void PlaceBadge()
+            {
+                var width = UiMetrics.Px(this, 54);
+                var height = Math.Min(Math.Max(1, title.ClientSize.Height), NativePageStyle.TextHeight(this, badge.Font, verticalPadding: 4));
+                badge.Bounds = new Rectangle(Math.Max(0, title.ClientSize.Width - width), 0, width, height);
+            }
+            title.SizeChanged += (_, _) => PlaceBadge();
+            PlaceBadge();
+        }
         FitLabelHeightToCard(card, title);
         var offerImageCandidates = found is { } offerMatch
             ? ArtCandidates(offerMatch.Skin, 0, offerMatch.Level)
@@ -845,19 +1128,16 @@ public sealed class StorePreviewControl : UserControl
         {
             Dock = DockStyle.Fill,
             Fit = ImageFit.Contain,
+            RoundedCorners = true,
             Cursor = Cursors.Hand,
             PlaceholderText = "画像なし"
         };
         var weapon = NativePageStyle.Label(skin?.Weapon ?? "詳細データなし", NativePageStyle.Reading, Theme.Muted); weapon.AutoSize = false; weapon.AutoEllipsis = false; weapon.Dock = DockStyle.Bottom; weapon.Height = NativePageStyle.TextHeight(this, weapon.Font, verticalPadding: 4);
-        var price = NativePageStyle.Label(Money(night ? offer.DiscountedCost ?? offer.Cost : offer.Cost), NativePageStyle.SmallBold, Theme.Text); price.AutoSize = false; price.Dock = DockStyle.Bottom; price.Height = NativePageStyle.TextHeight(this, price.Font, verticalPadding: 4);
+        var price = NativePageStyle.Label(OfferPriceText(offer, night), NativePageStyle.SmallBold, Theme.Text); price.AutoSize = false; price.Dock = DockStyle.Bottom; price.Height = NativePageStyle.TextHeight(this, price.Font, verticalPadding: 4);
         card.Controls.Add(image); card.Controls.Add(price); card.Controls.Add(weapon); card.Controls.Add(title);
-        if (night && offer.DiscountPercent is { } discount)
-        {
-            var discountLabel = NativePageStyle.Label($"−{discount:0}%", NativePageStyle.SmallBold, Theme.Red); discountLabel.Dock = DockStyle.Right; discountLabel.Width = UiMetrics.Px(this, 54);
-            card.Controls.Add(discountLabel); discountLabel.BringToFront();
-        }
         void Select(object? _, EventArgs __) => SelectOffer(offer.ItemId);
         card.Click += Select; title.Click += Select; image.Click += Select; weapon.Click += Select; price.Click += Select;
+        if (discountLabel is not null) discountLabel.Click += Select;
         _ = LoadStoreImageAsync(image, offerImageCandidates, StoreImageToken);
         return card;
     }
@@ -870,14 +1150,22 @@ public sealed class StorePreviewControl : UserControl
         var title = NativePageStyle.Label(name, NativePageStyle.BodyBold); title.AutoSize = false; title.AutoEllipsis = false; title.Dock = DockStyle.Top;
         FitLabelHeightToCard(card, title);
         // Banner art fills the card's image area edge to edge (cropped evenly, never stretched).
-        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Cover, PlaceholderText = "画像なし" };
+        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Cover, PlaceholderText = "画像なし", RoundedCorners = true };
         var items = bundle.Items.Where(item => item.ItemTypeId.Equals(SkinLevelType, StringComparison.OrdinalIgnoreCase)).ToArray();
-        var detail = NativePageStyle.Label($"{items.Length} 個の武器スキン  ·  {Money(bundle.TotalDiscountedCost ?? bundle.TotalBaseCost)}\n終了まで {FormatRemaining(bundle.RemainingSeconds)}", NativePageStyle.Small, Theme.Muted);
+        var detail = NativePageStyle.Label(BundleDetailText(bundle), NativePageStyle.Small, Theme.Muted);
         detail.AutoSize = false; detail.AutoEllipsis = false; detail.Dock = DockStyle.Bottom;
         FitLabelHeightToCard(card, detail);
         card.Controls.Add(image); card.Controls.Add(detail); card.Controls.Add(title);
+        bundleDetails.Add((bundle, detail));
         _ = LoadStoreImageAsync(image, bannerUrls, StoreImageToken);
         return card;
+    }
+
+    // Uses Remaining() so the time counts down from when the storefront was fetched, like the section timers.
+    private string BundleDetailText(StorefrontBundle bundle)
+    {
+        var skinCount = bundle.Items.Count(item => item.ItemTypeId.Equals(SkinLevelType, StringComparison.OrdinalIgnoreCase));
+        return $"{skinCount} 個の武器スキン  ·  {Money(bundle.TotalDiscountedCost ?? bundle.TotalBaseCost)}\n終了まで {Remaining(bundle.RemainingSeconds)}";
     }
 
     private Control CreateAccessoryCard(StorefrontOffer offer)
@@ -886,8 +1174,8 @@ public sealed class StorePreviewControl : UserControl
         if (catalogSnapshot is { } snapshot && snapshot.Accessories.TryGetValue(offer.ItemId, out var matchedItem)) item = matchedItem;
         var name = item?.Name ?? $"アクセサリー · {offer.ItemId[..Math.Min(8, offer.ItemId.Length)]}";
         var card = CreateStoreCard();
-        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Contain, PlaceholderText = "画像なし" };
-        var accessoryText = $"{name}\n{item?.Type ?? ItemTypeName(offer.ItemTypeId)}  ·  {Money(offer.Cost)}";
+        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Contain, PlaceholderText = "画像なし", RoundedCorners = true };
+        var accessoryText = $"{name}\n{item?.Type ?? ItemTypeName(offer.ItemTypeId, true)}  ·  {Money(offer.Cost)}";
         var text = NativePageStyle.Label(accessoryText, NativePageStyle.Reading, Theme.Text); text.AutoSize = false; text.AutoEllipsis = false; text.Dock = DockStyle.Bottom;
         FitLabelHeightToCard(card, text);
         card.Controls.Add(image); card.Controls.Add(text);
@@ -922,6 +1210,7 @@ public sealed class StorePreviewControl : UserControl
     private void RenderCatalogGrid()
     {
         if (IsDisposed) return;
+        using var redraw = PageRedrawScope.Begin(catalogGridHost);
         if (!catalogLoaded)
         {
             catalogSkeleton.Loading = loadingCatalog;
@@ -948,9 +1237,8 @@ public sealed class StorePreviewControl : UserControl
                 Math.Max(UiMetrics.Px(this, 70), catalogGrid.ClientSize.Height - catalogGrid.Padding.Vertical - UiMetrics.Px(this, 10)));
             return;
         }
-        catalogSkeleton.Loading = false;
-        UpdateCatalogPageSize(renderAfterChange: false);
         var filtered = FilteredSkins().ToArray();
+        UpdateCatalogPageSize(renderAfterChange: false, filtered);
         var selected = filtered.FirstOrDefault(s => s.Id.Equals(selectedSkin?.Id, StringComparison.OrdinalIgnoreCase));
         if (selected is null) { selectedSkin = filtered.FirstOrDefault(); selectedChroma = selectedLevel = 0; }
         else selectedSkin = selected;
@@ -977,6 +1265,7 @@ public sealed class StorePreviewControl : UserControl
                 if (card is null)
                 {
                     card = CreateSkinCard(skin);
+                    SizeCatalogCard(card);
                     catalogGrid.Controls.Add(card);
                 }
                 SizeCatalogCard(card);
@@ -989,34 +1278,52 @@ public sealed class StorePreviewControl : UserControl
         previousCatalogPage.Enabled = catalogPageIndex > 0;
         nextCatalogPage.Enabled = catalogPageIndex + 1 < pageCount;
         catalogPageLabel.Text = $"{catalogPageIndex + 1} / {pageCount}  ·  {filtered.Length:N0} 件";
+        catalogSkeleton.Loading = false;
     }
 
-    private void UpdateCatalogPageSize(bool renderAfterChange = true)
+    private void UpdateCatalogPageSize(bool renderAfterChange = true, IReadOnlyList<SkinCard>? filtered = null)
     {
         if (catalogGrid.ClientSize.Width <= 0 || catalogGrid.ClientSize.Height <= 0) return;
         var availableWidth = Math.Max(0, catalogGrid.ClientSize.Width - catalogGrid.Padding.Horizontal);
         var availableHeight = Math.Max(0, catalogGrid.ClientSize.Height - catalogGrid.Padding.Vertical);
-        var cardWidth = UiMetrics.Px(this, 218);
-        var columns = Math.Max(1, availableWidth / Math.Max(1, cardWidth));
-        var nextCardWidth = Math.Max(1, availableWidth / columns - UiMetrics.Px(this, 8));
+        var cardMargin = UiMetrics.Px(this, UiMetrics.TightGap);
+        var cardGap = cardMargin * 2;
+        var cardsWidth = Math.Max(0, availableWidth - cardMargin * 2);
+        var cardWidth = UiMetrics.Px(this, 220);
+        var columns = Math.Clamp((cardsWidth + cardGap) / Math.Max(1, cardWidth + cardGap), 1, 6);
+        var nextCardWidth = Math.Max(1, (cardsWidth - cardGap * (columns - 1)) / columns);
         var widthChanged = catalogCardWidth != nextCardWidth;
         catalogCardWidth = nextCardWidth;
         var oldImageHeight = catalogCardImageHeight;
         var oldTitleHeight = catalogCardTitleHeight;
         var oldSubtitleHeight = catalogCardSubtitleHeight;
-        var cardHeight = CatalogCardFlowHeight(FilteredSkins().ToArray());
+        var cardHeight = CatalogCardFlowHeight();
         var rows = Math.Max(1, availableHeight / Math.Max(1, cardHeight));
         var nextSize = columns * rows;
         var cardSizeChanged = oldImageHeight != catalogCardImageHeight || oldTitleHeight != catalogCardTitleHeight || oldSubtitleHeight != catalogCardSubtitleHeight;
         if (nextSize == catalogPageSize && !cardSizeChanged)
         {
             if (widthChanged)
-                foreach (Control card in catalogGrid.Controls)
-                    if (card.Tag is SkinCard) card.Width = catalogCardWidth;
+            {
+                using var redraw = PageRedrawScope.Begin(catalogGridHost);
+                catalogGrid.SuspendLayout();
+                try
+                {
+                    foreach (Control card in catalogGrid.Controls)
+                        if (card.Tag is SkinCard) SizeCatalogCard(card);
+                }
+                finally { catalogGrid.ResumeLayout(true); }
+            }
             return;
         }
         var previousFirstVisible = catalogPageIndex * catalogPageSize;
-        var selectedIndexBeforeResize = selectedSkin is null ? -1 : FilteredSkins().ToList().FindIndex(s => s.Id.Equals(selectedSkin.Id, StringComparison.OrdinalIgnoreCase));
+        var selectedIndexBeforeResize = -1;
+        if (selectedSkin is { } current)
+        {
+            var skins = filtered ?? FilteredSkins().ToArray();
+            for (var i = 0; i < skins.Count; i++)
+                if (skins[i].Id.Equals(current.Id, StringComparison.OrdinalIgnoreCase)) { selectedIndexBeforeResize = i; break; }
+        }
         var selectedWasVisible = selectedIndexBeforeResize >= previousFirstVisible && selectedIndexBeforeResize < previousFirstVisible + catalogPageSize;
         catalogPageSize = nextSize;
         if ((catalogEnsureSelectedVisible || selectedWasVisible) && selectedIndexBeforeResize >= 0)
@@ -1031,13 +1338,18 @@ public sealed class StorePreviewControl : UserControl
     private Control CreateSkinCard(SkinCard skin)
     {
         var subtitleText = $"{skin.Weapon}\n{skin.Tier}";
-        var card = new Panel { Tag = skin, BackColor = Theme.Surface, Margin = new Padding(UiMetrics.Px(this, 4)), BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
-        var image = new SharpImageBox { Dock = DockStyle.Top, BackColor = Theme.Elevated, Cursor = Cursors.Hand, PlaceholderText = "画像なし" };
-        var title = NativePageStyle.Label(skin.Name, NativePageStyle.SmallBold, Theme.Text); title.AutoSize = false; title.AutoEllipsis = false; title.Dock = DockStyle.Top; title.Padding = new Padding(UiMetrics.Px(this, 4), 0, UiMetrics.Px(this, 4), 0); title.Cursor = Cursors.Hand;
-        var subtitle = NativePageStyle.Label(subtitleText, NativePageStyle.Small, Theme.Muted); subtitle.AutoSize = false; subtitle.AutoEllipsis = false; subtitle.Dock = DockStyle.Top; subtitle.Padding = new Padding(UiMetrics.Px(this, 4), 0, UiMetrics.Px(this, 4), 0); subtitle.Cursor = Cursors.Hand;
-        card.Controls.Add(subtitle); card.Controls.Add(title); card.Controls.Add(image);
+        var card = new Panel { Tag = skin, BackColor = Theme.Surface, Margin = new Padding(UiMetrics.Px(this, UiMetrics.TightGap)), BorderStyle = BorderStyle.FixedSingle, Cursor = Cursors.Hand };
+        var tierColor = TierColor(skin.TierColor);
+        var tierBar = new Panel { Name = CatalogTierBarName, Dock = DockStyle.Top, Height = CatalogTierBarHeight(), BackColor = tierColor, Margin = Padding.Empty, Cursor = Cursors.Hand };
+        var image = new SharpImageBox { Name = CatalogImageName, Dock = DockStyle.Top, BackColor = Theme.Elevated, Cursor = Cursors.Hand, PlaceholderText = "画像なし" };
+        var title = NativePageStyle.Label(skin.Name, NativePageStyle.SmallBold, Theme.Text); title.Name = CatalogTitleName; title.AutoSize = false; title.AutoEllipsis = true; title.Dock = DockStyle.Top; title.Padding = new Padding(UiMetrics.Px(this, UiMetrics.TightGap), 0, UiMetrics.Px(this, UiMetrics.TightGap), 0); title.Cursor = Cursors.Hand;
+        var subtitle = NativePageStyle.Label(subtitleText, NativePageStyle.Small, Theme.Muted); subtitle.Name = CatalogSubtitleName; subtitle.AutoSize = false; subtitle.AutoEllipsis = true; subtitle.Dock = DockStyle.Top; subtitle.Padding = new Padding(UiMetrics.Px(this, UiMetrics.TightGap), 0, UiMetrics.Px(this, UiMetrics.TightGap), 0); subtitle.Cursor = Cursors.Hand;
+        // Top-docked children stack in reverse add order: tier bar, image, title, subtitle.
+        card.Controls.Add(subtitle); card.Controls.Add(title); card.Controls.Add(image); card.Controls.Add(tierBar);
         void Select(object? _, EventArgs __) { selectedSkin = skin; selectedChroma = selectedLevel = 0; UpdateCatalogSelection(); }
-        card.Click += Select; image.Click += Select; title.Click += Select; subtitle.Click += Select;
+        card.Click += Select; image.Click += Select; title.Click += Select; subtitle.Click += Select; tierBar.Click += Select;
+        foreach (Control part in new Control[] { card, image, title, subtitle, tierBar })
+            part.MouseWheel += CatalogMouseWheel;
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         card.Disposed += (_, _) =>
         {
@@ -1051,48 +1363,142 @@ public sealed class StorePreviewControl : UserControl
     private void SizeCatalogCard(Control card)
     {
         var imageHeight = Math.Max(UiMetrics.Px(this, 58), catalogCardImageHeight);
-        var titleHeight = Math.Max(1, catalogCardTitleHeight);
-        var subtitleHeight = Math.Max(1, catalogCardSubtitleHeight);
-        card.Controls[0].Height = subtitleHeight;
-        card.Controls[1].Height = titleHeight;
-        card.Controls[2].Height = imageHeight;
-        card.Size = new Size(Math.Max(1, catalogCardWidth), imageHeight + titleHeight + subtitleHeight + UiMetrics.Px(this, 4));
+        var titleHeight = catalogCardTitleHeight > 0 ? catalogCardTitleHeight : NativePageStyle.TextHeight(this, NativePageStyle.SmallBold, lines: 2, verticalPadding: UiMetrics.TightGap);
+        var subtitleHeight = catalogCardSubtitleHeight > 0 ? catalogCardSubtitleHeight : NativePageStyle.TextHeight(this, NativePageStyle.Small, lines: 2, verticalPadding: UiMetrics.TightGap);
+        var barHeight = CatalogTierBarHeight();
+        if (card.Controls[CatalogSubtitleName] is { } subtitle) subtitle.Height = subtitleHeight;
+        if (card.Controls[CatalogTitleName] is { } title) title.Height = titleHeight;
+        if (card.Controls[CatalogImageName] is { } image) image.Height = imageHeight;
+        if (card.Controls[CatalogTierBarName] is { } bar) bar.Height = barHeight;
+        card.Size = new Size(Math.Max(1, catalogCardWidth), barHeight + imageHeight + titleHeight + subtitleHeight + UiMetrics.Px(this, UiMetrics.TightGap));
+    }
+
+    private const string CatalogTierBarName = "tierBar";
+    private const string CatalogImageName = "image";
+    private const string CatalogTitleName = "title";
+    private const string CatalogSubtitleName = "subtitle";
+
+    private int CatalogTierBarHeight() => Math.Max(2, UiMetrics.Px(this, 3));
+
+    private static Color TierColor(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return Theme.Muted;
+        try
+        {
+            var color = ColorTranslator.FromHtml(value.Trim());
+            return color.IsEmpty ? Theme.Muted : Color.FromArgb(255, color);
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException) { return Theme.Muted; }
+    }
+
+    // One wheel notch turns one catalog page; the grid never scrolls, so the wheel has no other use here.
+    private void CatalogMouseWheel(object? sender, MouseEventArgs e)
+    {
+        if (!catalogLoaded || e.Delta == 0) return;
+        if (e is HandledMouseEventArgs handled) handled.Handled = true;
+        if (e.Delta > 0)
+        {
+            if (!previousCatalogPage.Enabled || catalogPageIndex <= 0) return;
+            catalogPageIndex--;
+        }
+        else
+        {
+            if (!nextCatalogPage.Enabled) return;
+            catalogPageIndex++;
+        }
+        // Re-render after the wheel message returns: the new page disposes the card that raised it.
+        if (IsHandleCreated) BeginInvoke(() => { if (!IsDisposed) RenderCatalogGrid(); });
+        else RenderCatalogGrid();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        catalogMetricsGeneration++;
+        catalogMetricsStop?.Cancel();
+        catalogTextMetricsReady = false;
+        catalogCardTitleHeight = catalogCardSubtitleHeight = 0;
+        if (catalogLoaded)
+        {
+            _ = MeasureCatalogTextHeightsAsync();
+            UpdateCatalogPageSize();
+        }
     }
 
     private void UpdateCatalogSelection()
     {
         foreach (Control card in catalogGrid.Controls)
             card.BackColor = card.Tag is SkinCard skin && skin.Id.Equals(selectedSkin?.Id, StringComparison.OrdinalIgnoreCase)
-                ? Color.FromArgb(51, 34, 42) : Theme.Surface;
+                ? Theme.CatalogHighlight : Theme.Surface;
         RenderPreview();
     }
 
-    private int CatalogCardFlowHeight(IReadOnlyList<SkinCard> skins)
+    private int CatalogCardFlowHeight()
     {
         var minimumImageHeight = UiMetrics.Px(this, 58);
-        MeasureCatalogTextHeights();
-        var titleHeight = catalogCardTitleHeight > 0 ? catalogCardTitleHeight : NativePageStyle.TextHeight(this, NativePageStyle.SmallBold, lines: 3, verticalPadding: 4);
-        var subtitleHeight = catalogCardSubtitleHeight > 0 ? catalogCardSubtitleHeight : NativePageStyle.TextHeight(this, NativePageStyle.Small, lines: 3, verticalPadding: 4);
-        var marginHeight = UiMetrics.Px(this, 8);
-        var minimumCardHeight = minimumImageHeight + titleHeight + subtitleHeight + UiMetrics.Px(this, 4);
+        var titleHeight = catalogCardTitleHeight > 0 ? catalogCardTitleHeight : NativePageStyle.TextHeight(this, NativePageStyle.SmallBold, lines: 2, verticalPadding: UiMetrics.TightGap);
+        var subtitleHeight = catalogCardSubtitleHeight > 0 ? catalogCardSubtitleHeight : NativePageStyle.TextHeight(this, NativePageStyle.Small, lines: 2, verticalPadding: UiMetrics.TightGap);
+        var marginHeight = UiMetrics.Px(this, UiMetrics.ControlGap);
+        var chromeHeight = CatalogTierBarHeight() + titleHeight + subtitleHeight + UiMetrics.Px(this, UiMetrics.TightGap);
+        var minimumCardHeight = minimumImageHeight + chromeHeight;
         var availableHeight = Math.Max(1, catalogGrid.ClientSize.Height - catalogGrid.Padding.Vertical);
         var rows = Math.Max(1, availableHeight / Math.Max(1, minimumCardHeight + marginHeight));
         var targetCardHeight = Math.Max(minimumCardHeight, availableHeight / rows - marginHeight);
-        catalogCardImageHeight = Math.Max(minimumImageHeight, targetCardHeight - titleHeight - subtitleHeight - UiMetrics.Px(this, 4));
-        return catalogCardImageHeight + titleHeight + subtitleHeight + UiMetrics.Px(this, 4) + marginHeight;
+        catalogCardImageHeight = Math.Max(minimumImageHeight, targetCardHeight - chromeHeight);
+        return catalogCardImageHeight + chromeHeight + marginHeight;
     }
 
-    private void MeasureCatalogTextHeights()
+    private async Task MeasureCatalogTextHeightsAsync()
     {
-        if (catalogTextMetricsReady) return;
+        if (catalogTextMetricsReady || allSkins.Count == 0 || IsDisposed || Disposing) return;
+        // Text rows are capped at two lines (longer names ellipsize) so one unusually long skin name
+        // cannot shrink the image area of every card in the catalog. Measure off the UI thread.
+        catalogMetricsStop?.Cancel();
+        var operation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        catalogMetricsStop = operation;
+        var generation = ++catalogMetricsGeneration;
+        var skins = allSkins;
+        var dpi = DeviceDpi;
         var textWidth = Math.Max(1, UiMetrics.Px(this, 210) - UiMetrics.Px(this, 20));
-        catalogCardTitleHeight = allSkins.Count == 0
-            ? NativePageStyle.TextHeight(this, NativePageStyle.SmallBold, lines: 3, verticalPadding: 4)
-            : allSkins.Max(skin => NativePageStyle.TextBlockHeight(this, skin.Name, NativePageStyle.SmallBold, textWidth, verticalPadding: 4));
-        catalogCardSubtitleHeight = allSkins.Count == 0
-            ? NativePageStyle.TextHeight(this, NativePageStyle.Small, lines: 3, verticalPadding: 4)
-            : allSkins.Max(skin => NativePageStyle.TextBlockHeight(this, $"{skin.Weapon}\n{skin.Tier}", NativePageStyle.Small, textWidth, verticalPadding: 4));
-        catalogTextMetricsReady = allSkins.Count > 0;
+        var verticalPadding = UiMetrics.Px(this, UiMetrics.TightGap);
+        var titleCap = NativePageStyle.TextHeight(this, NativePageStyle.SmallBold, lines: 2, verticalPadding: UiMetrics.TightGap);
+        var subtitleCap = NativePageStyle.TextHeight(this, NativePageStyle.Small, lines: 2, verticalPadding: UiMetrics.TightGap);
+        using var titleFont = (Font)NativePageStyle.SmallBold.Clone();
+        using var subtitleFont = (Font)NativePageStyle.Small.Clone();
+        try
+        {
+            var measured = await Task.Run(() =>
+            {
+                var titleHeight = 0;
+                var subtitleHeight = 0;
+                foreach (var skin in skins)
+                {
+                    operation.Token.ThrowIfCancellationRequested();
+                    titleHeight = Math.Max(titleHeight, MeasureTextBlockHeight(skin.Name, titleFont, textWidth, verticalPadding));
+                    subtitleHeight = Math.Max(subtitleHeight, MeasureTextBlockHeight($"{skin.Weapon}\n{skin.Tier}", subtitleFont, textWidth, verticalPadding));
+                    if (titleHeight >= titleCap && subtitleHeight >= subtitleCap) break;
+                }
+                return (Title: Math.Min(titleCap, titleHeight), Subtitle: Math.Min(subtitleCap, subtitleHeight));
+            }, operation.Token);
+            if (generation != catalogMetricsGeneration || dpi != DeviceDpi || !ReferenceEquals(skins, allSkins) || IsDisposed || Disposing) return;
+            catalogCardTitleHeight = measured.Title;
+            catalogCardSubtitleHeight = measured.Subtitle;
+            catalogTextMetricsReady = true;
+            if (catalogLoaded && catalogPage.Visible) UpdateCatalogPageSize();
+        }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested) { }
+        finally
+        {
+            if (ReferenceEquals(catalogMetricsStop, operation)) catalogMetricsStop = null;
+            operation.Dispose();
+        }
+    }
+
+    private static int MeasureTextBlockHeight(string text, Font font, int width, int verticalPadding)
+    {
+        var measured = TextRenderer.MeasureText(text, font, new Size(Math.Max(1, width), 100_000),
+            TextFormatFlags.WordBreak | TextFormatFlags.NoPadding);
+        return Math.Max(1, measured.Height) + verticalPadding;
     }
 
     private void RenderPreview()
@@ -1104,6 +1510,7 @@ public sealed class StorePreviewControl : UserControl
         selectedLevel = Math.Clamp(selectedLevel, 0, Math.Max(0, levels.Count - 1));
         var nextPreview = (skin, selectedChroma, selectedLevel);
         if (displayedPreview == nextPreview) return;
+        using var redraw = PageRedrawScope.Begin(previewPanel);
         displayedPreview = nextPreview;
 
         previewGeneration++;
@@ -1120,8 +1527,10 @@ public sealed class StorePreviewControl : UserControl
             catalogTitle.Text = "スキンを選ぶと、画像・動画・カラーバリエーションを表示します。";
             catalogMeta.Text = ""; previewMessage.Text = "条件に一致するスキンがありません。";
             playVideoButton.Tag = null;
-            playVideoButton.Visible = false;
+            playVideoButton.Visible = true;
+            playVideoButton.Enabled = false;
             DisposeFlowChildren(chromaOptions); DisposeFlowChildren(levelOptions);
+            resizeMediaActions?.Invoke();
             return;
         }
 
@@ -1132,17 +1541,31 @@ public sealed class StorePreviewControl : UserControl
         var imageUrls = ArtCandidates(skin, selectedChroma, selectedLevel);
         previewImageLoad = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         _ = LoadPreviewImageAsync(imageUrls, generation, previewImageLoad.Token);
-        BuildOptionButtons(chromaOptions, chromas.Select((item, index) => VariantLabel(skin.Name, item.Name, "カラー", index)).ToArray(), selectedChroma, index => { selectedChroma = index; RenderPreview(); });
+        BuildOptionButtons(chromaOptions, chromas.Select((item, index) => VariantLabel(skin.Name, item.Name, "カラー", index)).ToArray(),
+            selectedChroma, index => { selectedChroma = index; RenderPreview(); }, chromas.Select(item => item.Swatch).ToArray(), generation, previewImageLoad.Token);
         BuildOptionButtons(levelOptions, levels.Select((item, index) => VariantLabel(skin.Name, item.Name, "レベル", index)).ToArray(), selectedLevel, index => { selectedLevel = index; RenderPreview(); });
         resizePreviewLayout?.Invoke();
         var video = SelectedVideo(skin, selectedChroma, selectedLevel);
-        playVideoButton.Visible = !string.IsNullOrWhiteSpace(video);
-        stopVideoButton.Visible = videoHost.Visible;
         playVideoButton.Tag = video;
+        playVideoButton.Visible = true;
+        playVideoButton.Enabled = !string.IsNullOrWhiteSpace(video);
+        stopVideoButton.Visible = videoHost.Visible;
+        resizeMediaActions?.Invoke();
     }
 
-    private void BuildOptionButtons(FlowLayoutPanel host, IReadOnlyList<string> labels, int selected, Action<int> select)
+    private void BuildOptionButtons(FlowLayoutPanel host, IReadOnlyList<string> labels, int selected, Action<int> select,
+        IReadOnlyList<string?>? swatches = null, int generation = 0, CancellationToken cancellationToken = default)
     {
+        using var redraw = PageRedrawScope.Begin(host);
+        host.SuspendLayout();
+        try
+        {
+        foreach (var oldButton in host.Controls.OfType<ThemedButton>())
+        {
+            oldButton.LeadingImage = null;
+            if (oldButton.Tag is Image oldImage) oldImage.Dispose();
+            oldButton.Tag = null;
+        }
         DisposeFlowChildren(host);
         ResizeOptionButtons(host);
         if (labels.Count == 0)
@@ -1150,16 +1573,57 @@ public sealed class StorePreviewControl : UserControl
             host.Controls.Add(NativePageStyle.Label("情報がありません。", NativePageStyle.Small, Theme.Muted));
             return;
         }
+        var available = Math.Max(UiMetrics.Px(this, 100), host.ClientSize.Width > 0 ? host.ClientSize.Width : host.Parent?.ClientSize.Width ?? UiMetrics.Px(this, 360));
+        var buttonSize = OptionButtonSize(host, available);
         for (var i = 0; i < labels.Count; i++)
         {
             var index = i;
-            var available = Math.Max(UiMetrics.Px(this, 100), host.ClientSize.Width > 0 ? host.ClientSize.Width : host.Parent?.ClientSize.Width ?? UiMetrics.Px(this, 360));
-            var columns = available >= UiMetrics.Px(this, 330) ? 3 : available >= UiMetrics.Px(this, 220) ? 2 : 1;
-            var buttonWidth = Math.Min(UiMetrics.Px(this, 148), Math.Max(UiMetrics.Px(this, 82), (available - UiMetrics.Px(this, 16)) / columns - UiMetrics.Px(this, 4)));
-            var buttonHeight = available < UiMetrics.Px(this, 420) ? UiMetrics.Px(this, 30) : UiMetrics.Px(this, 36);
-            var button = new ThemedButton { Text = labels[i].Length == 0 ? $"{i + 1}" : labels[i], Size = new Size(buttonWidth, buttonHeight), Compact = true, Primary = i == selected, Margin = new Padding(UiMetrics.Px(this, 2)) };
+            var button = new ThemedButton
+            {
+                Text = labels[i].Length == 0 ? $"{i + 1}" : labels[i], Name = labels[i].Length == 0 ? $"{i + 1}" : labels[i],
+                Size = buttonSize, Compact = true, Variant = ButtonVariant.Chip, Selected = i == selected,
+                Margin = new Padding(UiMetrics.Px(this, UiMetrics.TightGap)),
+                AccessibleName = ReferenceEquals(host, levelOptions) ? $"レベル {i + 1} を選択" : $"{labels[i]} を選択",
+                AccessibleDescription = i == selected ? "選択中" : ReferenceEquals(host, levelOptions) ? "アップグレードレベル" : "カラーバリエーション"
+            };
             button.Click += (_, _) => select(index);
+            button.Disposed += (_, _) =>
+            {
+                button.LeadingImage = null;
+                if (button.Tag is Image image) image.Dispose();
+                button.Tag = null;
+            };
             host.Controls.Add(button);
+            if (swatches is not null && i < swatches.Count && !string.IsNullOrWhiteSpace(swatches[i]))
+                _ = LoadChromaSwatchAsync(button, swatches[i]!, generation, cancellationToken);
+        }
+        }
+        finally { host.ResumeLayout(true); }
+    }
+
+    private async Task LoadChromaSwatchAsync(ThemedButton button, string url, int generation, CancellationToken cancellationToken)
+    {
+        Image? image;
+        try { image = await NativeImageCache.LoadOriginalAsync(url, cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return; }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidOperationException or TaskCanceledException) { return; }
+        if (image is null) return;
+        if (IsDisposed || button.IsDisposed || cancellationToken.IsCancellationRequested || generation != previewGeneration)
+        {
+            image.Dispose();
+            return;
+        }
+        using (PageRedrawScope.Begin(previewPanel))
+        {
+            chromaOptions.SuspendLayout();
+            try
+            {
+                button.Tag = image;
+                button.LeadingImage = image;
+                ResizeOptionButtons(chromaOptions);
+                resizePreviewLayout?.Invoke();
+            }
+            finally { chromaOptions.ResumeLayout(true); }
         }
     }
 
@@ -1167,24 +1631,37 @@ public sealed class StorePreviewControl : UserControl
     {
         var available = host.ClientSize.Width > 0 ? host.ClientSize.Width : host.Parent?.ClientSize.Width ?? 0;
         if (available <= 0) return;
-        var columns = available >= UiMetrics.Px(this, 330) ? 3 : available >= UiMetrics.Px(this, 220) ? 2 : 1;
-        var width = Math.Min(UiMetrics.Px(this, 148), Math.Max(UiMetrics.Px(this, 82), (available - UiMetrics.Px(this, 16)) / columns - UiMetrics.Px(this, 4)));
-        var height = available < UiMetrics.Px(this, 420) ? UiMetrics.Px(this, 30) : UiMetrics.Px(this, 36);
+        var size = OptionButtonSize(host, available);
         foreach (Control child in host.Controls)
             if (child is ThemedButton button)
             {
-                button.Size = new Size(width, height);
-                button.Margin = new Padding(UiMetrics.Px(this, 2));
+                if (button.Size != size) button.Size = size;
+                button.Margin = new Padding(UiMetrics.Px(this, UiMetrics.TightGap));
+                var label = string.IsNullOrEmpty(button.Name) ? button.AccessibleName ?? button.Text : button.Name;
+                var hasSwatch = ReferenceEquals(host, chromaOptions) && button.LeadingImage is { Width: > 0 };
+                var textWidth = TextRenderer.MeasureText(label, button.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width;
+                var requiredWidth = textWidth + UiMetrics.Px(this, UiMetrics.ControlGap) * 2
+                    + (hasSwatch ? UiMetrics.Px(this, 22 + UiMetrics.TightGap) : 0);
+                if (button.Width >= requiredWidth)
+                    button.Text = label;
+                else if (hasSwatch)
+                    button.Text = string.Empty;
+                else if (ReferenceEquals(host, chromaOptions))
+                    button.Text = button.Name.StartsWith("カラー ", StringComparison.Ordinal)
+                        ? $"色 {button.Name[4..]}"
+                        : button.Name.Length > 2 ? button.Name[..2] : button.Name;
+                else
+                    button.Text = label;
             }
     }
 
     private static string VariantLabel(string skinName, string variantName, string fallback, int index)
     {
+        // Levels are always numbered the same way so a row never mixes "レベル 1" with "Lv.2".
+        if (fallback == "レベル") return $"Lv.{index + 1}";
         var label = variantName.Trim();
         if (label.StartsWith(skinName, StringComparison.CurrentCultureIgnoreCase))
             label = label[skinName.Length..].Trim(' ', '-', '–', '—', ':', '：', '·');
-        if (fallback == "レベル")
-            label = label.Replace("Level", "レベル", StringComparison.OrdinalIgnoreCase);
         if (label.Length == 0 || label.Equals(skinName, StringComparison.CurrentCultureIgnoreCase) || label.Length > 6)
             return $"{fallback} {index + 1}";
         return label;
@@ -1198,6 +1675,7 @@ public sealed class StorePreviewControl : UserControl
             SetStatus("このオファーの武器スキンはカタログにありません。", true);
             return;
         }
+        using var redraw = PageRedrawScope.Begin(storePage.Parent!);
         selectedSkin = found.Value.Skin;
         selectedLevel = found.Value.Level;
         selectedChroma = 0;
@@ -1207,7 +1685,7 @@ public sealed class StorePreviewControl : UserControl
         categorySelect.SelectedIndex = 0;
         weaponSelect.SelectedIndex = 0;
         changingFilters = false;
-        if (!catalogTab.Primary)
+        if (!catalogTab.Selected)
         {
             catalogEnsureSelectedVisible = true;
             ShowCatalogPage();
@@ -1274,19 +1752,35 @@ public sealed class StorePreviewControl : UserControl
 
     private void ShowStorePage()
     {
-        if (storeTab.Primary) return;
+        if (storeTab.Selected) return;
+        using var redraw = PageRedrawScope.Begin(storePage.Parent!);
         storePage.Visible = true; catalogPage.Visible = false;
-        storeTab.Primary = true; catalogTab.Primary = false;
+        storeTab.Selected = true; catalogTab.Selected = false;
         ShowPreviewImage();
+        PreparePageLayout();
     }
 
     private void ShowCatalogPage()
     {
-        if (catalogTab.Primary) return;
+        if (catalogTab.Selected) return;
+        using var redraw = PageRedrawScope.Begin(storePage.Parent!);
+        switchingCatalogPage = true;
+        try
+        {
         ShowPreviewImage();
-        storeTab.Primary = false; catalogTab.Primary = true;
+        storeTab.Selected = false; catalogTab.Selected = true;
         catalogPage.Visible = true; storePage.Visible = false;
+        PreparePageLayout();
+        void LayoutTree(Control control)
+        {
+            control.PerformLayout();
+            foreach (Control child in control.Controls)
+                if (child.Visible) LayoutTree(child);
+        }
+        LayoutTree(catalogPage);
         RenderCatalogGrid();
+        }
+        finally { switchingCatalogPage = false; }
         if (!catalogLoaded) _ = LoadCatalogAsync(refresh: false);
     }
 
@@ -1304,13 +1798,14 @@ public sealed class StorePreviewControl : UserControl
         if (videoHost.Visible)
         {
             mediaPlayer.Play();
+            videoPaused = false;
+            UpdateVideoControls();
             if (!previewImage.Visible) playbackOpened?.TrySetResult(true);
             return true;
         }
         if (videoLoad is { IsCancellationRequested: false }) return false;
 
         videoLoad?.Cancel();
-        videoLoad?.Dispose();
         var operation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, externalToken);
         videoLoad = operation;
         SetStatus(VideoPrepareStatus, false);
@@ -1319,12 +1814,21 @@ public sealed class StorePreviewControl : UserControl
         previewImage.Visible = false;
         videoLoadingOverlay.Visible = true;
         videoLoadingOverlay.BringToFront();
+        playVideoButton.Visible = false;
         stopVideoButton.Text = "キャンセル";
         stopVideoButton.Invalidate();
         stopVideoButton.Visible = true;
         try
         {
-            var localFile = await NativeVideoCache.GetLocalFileAsync(url, operation.Token);
+            var downloadProgress = new Progress<(long Received, long? Total)>(progress =>
+            {
+                if (IsDisposed || !ReferenceEquals(videoLoad, operation) || operation.IsCancellationRequested) return;
+                var receivedMb = progress.Received / (1024d * 1024d);
+                videoLoadingOverlay.LoadingMessage = progress.Total is > 0
+                    ? $"動画を取得しています… {receivedMb:0.0}/{progress.Total.Value / (1024d * 1024d):0.0} MB"
+                    : $"動画を取得しています… {receivedMb:0.0} MB";
+            });
+            var localFile = await NativeVideoCache.GetLocalFileAsync(url, operation.Token, downloadProgress);
             if (string.IsNullOrWhiteSpace(localFile) || IsDisposed || operation.IsCancellationRequested)
             {
                 if (!operation.IsCancellationRequested)
@@ -1341,8 +1845,9 @@ public sealed class StorePreviewControl : UserControl
             videoOpening = true;
             videoOpenTimer.Stop();
             videoOpenTimer.Start();
-            videoHost.Visible = true;
-            videoHost.BringToFront();
+            // The ElementHost HWND must exist for WPF to open the media, but a full-size host would
+            // cover the loading overlay (WinForms/WPF airspace). Park it at 1x1 off-screen until MediaOpened.
+            ParkVideoHost();
             videoLoadingOverlay.BringToFront();
             mediaPlayer.Source = uri;
             mediaPlayer.Play();
@@ -1354,8 +1859,9 @@ public sealed class StorePreviewControl : UserControl
                 ShowPreviewImage();
             return false;
         }
-        catch (Exception ex) when (ex is InvalidOperationException or UriFormatException or IOException)
+        catch (Exception ex)
         {
+            NativePageStyle.LogPageError("StoreVideo", ex);
             if (ReferenceEquals(videoLoad, operation) && !IsDisposed && !Disposing)
             {
                 ShowPreviewImage();
@@ -1373,14 +1879,45 @@ public sealed class StorePreviewControl : UserControl
     private void ShowPreviewImage()
     {
         StopMedia();
+        videoPaused = false;
         videoLoadingOverlay.Loading = false;
         videoLoadingOverlay.Visible = false;
         previewImage.Visible = true;
         previewImage.BringToFront();
-        videoHost.Visible = false;
-        stopVideoButton.Text = "画像に戻る";
+        RestoreVideoHost();
+        stopVideoButton.Text = "画像へ";
         stopVideoButton.Invalidate();
         stopVideoButton.Visible = false;
+        playbackButton.Visible = false;
+        muteVideoButton.Visible = false;
+        playVideoButton.Visible = true;
+        playVideoButton.Enabled = !string.IsNullOrWhiteSpace(playVideoButton.Tag as string);
+        resizeMediaActions?.Invoke();
+    }
+
+    private void ToggleVideoPlayback()
+    {
+        if (!videoHost.Visible || videoOpening) return;
+        if (videoPaused) mediaPlayer.Play();
+        else mediaPlayer.Pause();
+        videoPaused = !videoPaused;
+        UpdateVideoControls();
+    }
+
+    private void ToggleVideoMute()
+    {
+        if (!videoHost.Visible) return;
+        mediaPlayer.IsMuted = !mediaPlayer.IsMuted;
+        UpdateVideoControls();
+    }
+
+    private void UpdateVideoControls()
+    {
+        playbackButton.Text = videoPaused ? "再生" : "一時停止";
+        playbackButton.AccessibleName = videoPaused ? "動画を再生" : "動画を一時停止";
+        muteVideoButton.Text = "音声";
+        muteVideoButton.AccessibleName = mediaPlayer.IsMuted ? "動画の音声をオン" : "動画をミュート";
+        resizeMediaActions?.Invoke();
     }
 
     private void StopMedia()
@@ -1391,11 +1928,27 @@ public sealed class StorePreviewControl : UserControl
         videoLoadingOverlay.Visible = false;
         videoLoad?.Cancel();
         playbackOpened?.TrySetResult(false);
-        try { mediaPlayer.Stop(); mediaPlayer.Source = null; }
+        try { mediaPlayer.Stop(); mediaPlayer.Close(); mediaPlayer.Source = null; }
         catch (InvalidOperationException) { }
-        videoHost.Visible = false;
+        RestoreVideoHost();
         // A cancelled or superseded video never reaches MediaOpened/MediaFailed, so release its wait state here.
         EndProgress(VideoPrepareStatus);
+    }
+
+    private void ParkVideoHost()
+    {
+        videoHost.Dock = DockStyle.None;
+        videoHost.Size = new Size(1, 1);
+        videoHost.Location = new Point(-10, -10);
+        videoHost.Visible = true;
+    }
+
+    // Returns the host to its normal full-size slot, hidden unless the caller shows it.
+    private void RestoreVideoHost(bool visible = false)
+    {
+        if (videoHost.IsDisposed) return;
+        videoHost.Dock = DockStyle.Fill;
+        videoHost.Visible = visible;
     }
 
     private void ResizeVideoSurface()
@@ -1481,26 +2034,36 @@ public sealed class StorePreviewControl : UserControl
         var progress = IsProgressMessage(message);
         if (progress)
         {
-            activeProgressStatus = message;
-            SetStatusDisplay("", error: false);
+            if (activeProgressStatuses.Count == 0) { settledStatus = ""; settledStatusError = false; }
+            if (!activeProgressStatuses.Contains(message)) activeProgressStatuses.Add(message);
+            SetSpinner(true);
+            SetStatusDisplay(message, error: false);
             return;
         }
-        activeProgressStatus = "";
-        if (!progress)
+        if (message.Length > 0 || !settledStatusError)
         {
             settledStatus = message;
             settledStatusError = error;
         }
-        SetStatusDisplay(message, error);
+        SetSpinner(activeProgressStatuses.Count > 0);
+        SetStatusDisplay(activeProgressStatuses.Count > 0 ? activeProgressStatuses[^1] : settledStatus, activeProgressStatuses.Count == 0 && settledStatusError);
+    }
+
+    private void SetSpinner(bool active)
+    {
+        if (statusSpinner.IsDisposed) return;
+        statusSpinner.Active = active;
+        statusSpinner.Visible = active;
     }
 
     // Ends a progress status that finished without reporting a result (cancel, closed login window, etc.).
     private void EndProgress(string message)
     {
-        if (!IsDisposed && !Disposing && activeProgressStatus == message)
+        if (!disposingStore && !IsDisposed && !Disposing && activeProgressStatuses.Remove(message))
         {
-            activeProgressStatus = "";
-            SetStatus(settledStatus, settledStatusError);
+            SetSpinner(activeProgressStatuses.Count > 0);
+            SetStatusDisplay(activeProgressStatuses.Count > 0 ? activeProgressStatuses[^1] : settledStatus,
+                activeProgressStatuses.Count == 0 && settledStatusError);
         }
     }
 
@@ -1523,11 +2086,21 @@ public sealed class StorePreviewControl : UserControl
 
     private void UpdateCountdowns()
     {
-        if (storefront is null || storefrontFetchedAt == default) return;
+        if (storefront is null || storefrontFetchedAt == default)
+        {
+            dailyTimerLabel.Text = accessoryTimerLabel.Text = bundleTimerLabel.Text = nightTimerLabel.Text = "—";
+            return;
+        }
         dailyTimerLabel.Text = Remaining(storefront.DailySkins.RemainingSeconds);
         accessoryTimerLabel.Text = Remaining(storefront.Accessories.RemainingSeconds);
         bundleTimerLabel.Text = Remaining(storefront.FeaturedBundles.RemainingSeconds);
         nightTimerLabel.Text = storefront.NightMarket is { } market ? Remaining(market.RemainingSeconds) : "—";
+        foreach (var (bundle, detail) in bundleDetails)
+        {
+            if (detail.IsDisposed) continue;
+            var text = BundleDetailText(bundle);
+            if (detail.Text != text) detail.Text = text;
+        }
     }
 
     private string Remaining(long seconds)
@@ -1555,7 +2128,7 @@ public sealed class StorePreviewControl : UserControl
         }
     }
 
-    private string ActiveStoreSection() => dailySectionTab.Primary ? "daily" : nightSectionTab.Primary ? "night" : bundleSectionTab.Primary ? "bundle" : accessorySectionTab.Primary ? "accessories" : "daily";
+    private string ActiveStoreSection() => dailySectionTab.Selected ? "daily" : nightSectionTab.Selected ? "night" : bundleSectionTab.Selected ? "bundle" : accessorySectionTab.Selected ? "accessories" : "daily";
 
     private static string CategoryKey(string value) => value.Split("::", StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "";
     private static string CategoryLabel(string category) => category switch
@@ -1563,9 +2136,10 @@ public sealed class StorePreviewControl : UserControl
         "Sidearm" => "ハンドガン", "SMG" => "サブマシンガン", "Shotgun" => "ショットガン", "Rifle" => "ライフル",
         "Sniper" => "スナイパー", "Heavy" => "ヘビー", "Melee" => "近接武器", _ => category
     };
-    private static string ItemTypeName(string typeId) => typeId.ToLowerInvariant() switch
+    private static string ItemTypeName(string typeId, bool accessory = false) => typeId.ToLowerInvariant() switch
     {
-        BuddyType => "ガンバディ", SprayType => "スプレー", PlayerCardType => "プレイヤーカード", _ => "武器スキン"
+        BuddyType => "ガンバディー", SprayType => "スプレー", PlayerCardType => "プレイヤーカード",
+        "de7caa6b-adf7-4588-bbd1-143831e786c6" => "プレイヤータイトル", _ => accessory ? "アクセサリー" : "武器スキン"
     };
     private static string Money(IReadOnlyDictionary<string, long>? cost)
     {
@@ -1573,123 +2147,14 @@ public sealed class StorePreviewControl : UserControl
         var first = cost.First();
         return $"{first.Value:N0} { (CurrencyNames.TryGetValue(first.Key, out var name) ? name : "クレジット") }";
     }
-    private static string FormatRemaining(long seconds) => $"{Math.Max(0, seconds) / 3600:00}:{Math.Max(0, seconds) % 3600 / 60:00}:{Math.Max(0, seconds) % 60:00}";
-    private static ResponsiveCardGrid OfferGrid(double preferredAspect) => new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, PreferredAspect = preferredAspect };
-
-    /// <summary>A rotating accent that only animates while its wait state is visible.</summary>
-    private sealed class WaitingIndicator : Control
+    private static string OfferPriceText(StorefrontOffer offer, bool night)
     {
-        private readonly System.Windows.Forms.Timer timer = new() { Interval = 32 };
-        private readonly int ringSize;
-        private readonly int textGap;
-        private readonly int showDelay;
-        private bool active;
-        private long startedAt;
-
-        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-        public bool Active
-        {
-            get => active;
-            set
-            {
-                if (active == value) return;
-                active = value;
-                SyncTimer();
-                Invalidate();
-            }
-        }
-
-        // Logical px: ring diameter, optional inline text gap, and a short delay for tiny indicators.
-        public WaitingIndicator(int ringSize = 14, int textGap = 6, int showDelay = 150)
-        {
-            this.ringSize = Math.Max(1, ringSize);
-            this.textGap = Math.Max(0, textGap);
-            this.showDelay = Math.Max(0, showDelay);
-            Size = new Size(this.ringSize + this.textGap, Math.Max(18, this.ringSize));
-            AccessibleName = "読み込み中";
-            AccessibleRole = AccessibleRole.ProgressBar;
-            BackColor = Theme.Background;
-            Margin = Padding.Empty;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            timer.Tick += (_, _) =>
-            {
-                if (Environment.TickCount64 - startedAt >= this.showDelay)
-                {
-                    if (!System.Windows.SystemParameters.ClientAreaAnimation) timer.Stop();
-                    Invalidate();
-                }
-            };
-        }
-
-        protected override void OnVisibleChanged(EventArgs e)
-        {
-            base.OnVisibleChanged(e);
-            SyncTimer();
-        }
-
-        protected override void OnHandleCreated(EventArgs e)
-        {
-            base.OnHandleCreated(e);
-            UpdateSizeForDpi();
-            SyncTimer();
-        }
-
-        protected override void OnDpiChangedAfterParent(EventArgs e)
-        {
-            base.OnDpiChangedAfterParent(e);
-            UpdateSizeForDpi();
-        }
-
-        private void UpdateSizeForDpi()
-        {
-            var size = new Size(UiMetrics.Px(this, ringSize + textGap), UiMetrics.Px(this, Math.Max(18, ringSize)));
-            if (Size != size) Size = size;
-        }
-
-        protected override void OnHandleDestroyed(EventArgs e)
-        {
-            timer.Stop();
-            base.OnHandleDestroyed(e);
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            var elapsed = Environment.TickCount64 - startedAt - showDelay;
-            if (!active || elapsed < 0 || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            var stroke = Math.Max(1.4f, DeviceDpi / 96f * 1.8f * ringSize / 14f);
-            // Always a true circle: the docked height (status row) differs from the width.
-            var box = Math.Min(UiMetrics.Px(this, ringSize), Math.Min(ClientSize.Width - UiMetrics.Px(this, textGap), ClientSize.Height));
-            var diameter = box - stroke - 1f;
-            if (diameter <= 0) return;
-            var bounds = new RectangleF(stroke / 2f + 0.5f, (ClientSize.Height - diameter) / 2f, diameter, diameter);
-            using var track = new Pen(Theme.Border, stroke);
-            using var arc = new Pen(Theme.Red, stroke) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round };
-            e.Graphics.DrawEllipse(track, bounds);
-            var angle = System.Windows.SystemParameters.ClientAreaAnimation ? (elapsed % 1000) * .36f : 0f;
-            e.Graphics.DrawArc(arc, bounds, angle, 105f);
-        }
-
-        private void SyncTimer()
-        {
-            if (active && Visible && IsHandleCreated)
-            {
-                if (!timer.Enabled)
-                {
-                    startedAt = Environment.TickCount64;
-                    timer.Start();
-                }
-            }
-            else timer.Stop();
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) timer.Dispose();
-            base.Dispose(disposing);
-        }
+        if (!night || offer.DiscountedCost is null) return Money(offer.Cost);
+        var discounted = Money(offer.DiscountedCost);
+        var regular = Money(offer.Cost);
+        return discounted == regular ? discounted : $"{discounted}  (通常 {regular})";
     }
+    private static ResponsiveCardGrid OfferGrid(double preferredAspect) => new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, PreferredAspect = preferredAspect };
 
     private Control CreateEmptyMessage(string text, int width, int height)
     {

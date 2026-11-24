@@ -69,7 +69,7 @@ internal sealed class SystemBrowserAuth(string state, int port = 80, bool silent
 
     private async Task Accept(TcpListener listener, int actualPort, CancellationToken ct)
     {
-        using var slots = new SemaphoreSlim(4, 4);
+        using var slots = new SemaphoreSlim(32, 32);
         while (!ct.IsCancellationRequested)
         {
             TcpClient client;

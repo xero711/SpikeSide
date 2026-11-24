@@ -24,15 +24,21 @@ internal sealed record MatchHistorySaveResult(MatchHistorySaveOutcome Outcome, E
 internal sealed class MatchHistorySaveQueue
 {
     public delegate void SaveAction(string subject, IReadOnlyList<MatchAnalytics> matches, IReadOnlyDictionary<string, string> weapons, CancellationToken token);
+    public delegate void FavoriteAction(string subject, MatchDetailsData match, bool favorite, CancellationToken token);
 
     private readonly SaveAction save;
+    private readonly FavoriteAction? setFavorite;
     private readonly SemaphoreSlim writer = new(1, 1);
     private readonly object gate = new();
     private readonly Dictionary<string, MatchAnalytics> pending = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource session = new();
     private int epoch;
 
-    public MatchHistorySaveQueue(MatchHistoryArchive archive) : this(archive.Save) { }
+    public MatchHistorySaveQueue(MatchHistoryArchive archive)
+    {
+        save = archive.Save;
+        setFavorite = archive.SetFavorite;
+    }
 
     public MatchHistorySaveQueue(SaveAction save) => this.save = save;
 
@@ -118,5 +124,56 @@ internal sealed class MatchHistorySaveQueue
         {
             writer.Release();
         }
+    }
+
+    /// <summary>Writes favorite markers through the same writer used for match snapshots.</summary>
+    public async Task<MatchHistorySaveResult> SetFavoriteAsync(string subject, MatchDetailsData match, bool favorite, TimeSpan timeout, CancellationToken shutdown)
+    {
+        if (setFavorite is null)
+            return new(MatchHistorySaveOutcome.Failed, new InvalidOperationException("Favorite persistence is unavailable."));
+
+        int startEpoch;
+        CancellationToken sessionToken;
+        lock (gate)
+        {
+            startEpoch = epoch;
+            sessionToken = session.Token;
+        }
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(shutdown, sessionToken);
+        try { await writer.WaitAsync(cancellation.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) { return new(MatchHistorySaveOutcome.Superseded); }
+        try
+        {
+            lock (gate)
+                if (startEpoch != epoch) return new(MatchHistorySaveOutcome.Superseded);
+            cancellation.CancelAfter(timeout);
+            try
+            {
+                // Await the actual write before releasing the shared writer, even when cancellation arrives.
+                await Task.Run(() => setFavorite(subject, match, favorite, cancellation.Token), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+            {
+                return new(shutdown.IsCancellationRequested || sessionToken.IsCancellationRequested
+                    ? MatchHistorySaveOutcome.Superseded
+                    : MatchHistorySaveOutcome.TimedOut);
+            }
+            catch (Exception ex)
+            {
+                return new(sessionToken.IsCancellationRequested || shutdown.IsCancellationRequested
+                    ? MatchHistorySaveOutcome.Superseded
+                    : MatchHistorySaveOutcome.Failed, ex);
+            }
+            lock (gate)
+                if (startEpoch != epoch) return new(MatchHistorySaveOutcome.Superseded);
+            return new(MatchHistorySaveOutcome.Saved);
+        }
+        finally { writer.Release(); }
+    }
+
+    public async Task WaitForIdleAsync()
+    {
+        await writer.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        writer.Release();
     }
 }

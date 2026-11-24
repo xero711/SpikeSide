@@ -73,8 +73,7 @@ public sealed record MatchPlayerData(
     MatchPlayerStatsData? Stats)
 {
     public int? CompetitiveTier { get; init; }
-    public string DisplayName =>
-        GameName.Length == 0 ? "" : TagLine.Length == 0 ? GameName : $"{GameName}#{TagLine}";
+    public string DisplayName => GameName.Length == 0 || TagLine.Length == 0 ? GameName : $"{GameName}#{TagLine}";
 }
 
 /// <summary>
@@ -186,8 +185,7 @@ public sealed record PlayerMatchStats(
     IReadOnlyList<WeaponKillCount> WeaponKills)
 {
     public int? CompetitiveTier { get; init; }
-    public string DisplayName =>
-        GameName.Length == 0 ? "" : TagLine.Length == 0 ? GameName : $"{GameName}#{TagLine}";
+    public string DisplayName => GameName.Length == 0 || TagLine.Length == 0 ? GameName : $"{GameName}#{TagLine}";
 }
 
 /// <summary>
@@ -425,63 +423,7 @@ public static class MatchDetailsParser
         foreach (var element in array.EnumerateArray())
         {
             if (element.ValueKind != JsonValueKind.Object) continue;
-
-            var participants = new List<string>();
-            var participantSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var kills = new List<RoundKillData>();
-            var killKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var damage = new List<RoundDamageData>();
-            var hasDamage = false;
-
-            if (TryGetArray(element, out var playerStats, "playerStats"))
-            {
-                foreach (var ps in playerStats.EnumerateArray())
-                {
-                    if (ps.ValueKind != JsonValueKind.Object) continue;
-                    var subject = ReadString(ps, "subject", "puuid");
-                    if (subject.Length > 0 && participantSet.Add(subject)) participants.Add(subject);
-
-                    if (TryGetArray(ps, out var killArray, "kills"))
-                        AddKills(killArray.EnumerateArray(), subject, kills, killKeys);
-
-                    if (TryGetArray(ps, out var damageArray, "damage"))
-                    {
-                        hasDamage = true;
-                        if (subject.Length == 0) continue;
-                        foreach (var d in damageArray.EnumerateArray())
-                        {
-                            if (d.ValueKind != JsonValueKind.Object) continue;
-                            var receiver = ReadString(d, "receiver");
-                            if (receiver.Length == 0) continue;
-                            damage.Add(new RoundDamageData(
-                                subject,
-                                receiver,
-                                NonNegative(ReadInt(d, "damage")),
-                                NonNegative(ReadInt(d, "headshots")),
-                                NonNegative(ReadInt(d, "bodyshots")),
-                                NonNegative(ReadInt(d, "legshots"))));
-                        }
-                    }
-                }
-            }
-
-            // Merge player, round and match-level kill lists without double counting.
-            if (TryGetArray(element, out var roundKills, "kills"))
-                AddKills(roundKills.EnumerateArray(), "", kills, killKeys);
-
-            var roundNumber = ReadInt(element, "roundNum");
-            if (roundNumber.HasValue && matchKillsByRound is not null)
-                AddKills(matchKillsByRound[roundNumber], "", kills, killKeys);
-
-            parsed.Add((new RoundResultData(
-                roundNumber,
-                ReadString(element, "roundResult", "roundResultCode"),
-                ReadString(element, "winningTeam"),
-                ReadString(element, "winningTeamRole"),
-                participants,
-                kills,
-                damage,
-                hasDamage), order++));
+            parsed.Add((ParseRound(element, matchKillsByRound), order++));
         }
 
         return parsed
@@ -489,6 +431,54 @@ public static class MatchDetailsParser
             .ThenBy(p => p.Order)
             .Select(p => p.Round)
             .ToArray();
+    }
+
+    private sealed class RoundParseState
+    {
+        public readonly List<string> Participants = [];
+        public readonly HashSet<string> ParticipantSet = new(StringComparer.OrdinalIgnoreCase);
+        public readonly List<RoundKillData> Kills = [];
+        public readonly HashSet<string> KillKeys = new(StringComparer.OrdinalIgnoreCase);
+        public readonly List<RoundDamageData> Damage = [];
+        public bool HasDamage;
+    }
+
+    private static RoundResultData ParseRound(JsonElement element, ILookup<int?, JsonElement>? matchKillsByRound)
+    {
+        var state = new RoundParseState();
+        if (TryGetArray(element, out var playerStats, "playerStats"))
+            foreach (var player in playerStats.EnumerateArray()) ParseRoundPlayer(player, state);
+
+        // Merge player, round and match-level kill lists without double counting.
+        if (TryGetArray(element, out var roundKills, "kills"))
+            AddKills(roundKills.EnumerateArray(), "", state.Kills, state.KillKeys);
+        var roundNumber = ReadInt(element, "roundNum");
+        if (roundNumber.HasValue && matchKillsByRound is not null)
+            AddKills(matchKillsByRound[roundNumber], "", state.Kills, state.KillKeys);
+        return new RoundResultData(roundNumber, ReadString(element, "roundResult", "roundResultCode"),
+            ReadString(element, "winningTeam"), ReadString(element, "winningTeamRole"),
+            state.Participants, state.Kills, state.Damage, state.HasDamage);
+    }
+
+    private static void ParseRoundPlayer(JsonElement player, RoundParseState state)
+    {
+        if (player.ValueKind != JsonValueKind.Object) return;
+        var subject = ReadString(player, "subject", "puuid");
+        if (subject.Length > 0 && state.ParticipantSet.Add(subject)) state.Participants.Add(subject);
+        if (TryGetArray(player, out var kills, "kills"))
+            AddKills(kills.EnumerateArray(), subject, state.Kills, state.KillKeys);
+        if (!TryGetArray(player, out var damage, "damage")) return;
+        state.HasDamage = true;
+        if (subject.Length == 0) return;
+        foreach (var entry in damage.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object) continue;
+            var receiver = ReadString(entry, "receiver");
+            if (receiver.Length == 0) continue;
+            state.Damage.Add(new RoundDamageData(subject, receiver, NonNegative(ReadInt(entry, "damage")),
+                NonNegative(ReadInt(entry, "headshots")), NonNegative(ReadInt(entry, "bodyshots")),
+                NonNegative(ReadInt(entry, "legshots"))));
+        }
     }
 
     private static void AddKills(IEnumerable<JsonElement> entries, string ownerSubject, List<RoundKillData> kills, HashSet<string> keys)
@@ -512,17 +502,20 @@ public static class MatchDetailsParser
             }
 
             if (killer.Length == 0 && victim.Length == 0) continue;
-            var timeKey = roundTime is { } relative ? "r" + relative.ToString(CultureInfo.InvariantCulture)
-                : gameTime is { } absolute ? "g" + absolute.ToString(CultureInfo.InvariantCulture) : "";
+            var timeKey = "";
+            if (roundTime is { } relative) timeKey = "r" + relative.ToString(CultureInfo.InvariantCulture);
+            else if (gameTime is { } absolute) timeKey = "g" + absolute.ToString(CultureInfo.InvariantCulture);
             var key = string.Join('|', killer, victim, timeKey, damageItem);
             if (!keys.Add(key)) continue;
             kills.Add(new RoundKillData(killer, victim, roundTime, damageType, damageItem) { TimeSinceGameStartMillis = gameTime });
         }
     }
 
-    private static long? ReadKillTime(JsonElement kill, string primary, string alias) =>
-        ReadLong(kill, primary) is >= 0 and var time ? time
-        : ReadLong(kill, alias) is >= 0 and var alternate ? alternate : null;
+    private static long? ReadKillTime(JsonElement kill, string primary, string alias)
+    {
+        if (ReadLong(kill, primary) is >= 0 and var time) return time;
+        return ReadLong(kill, alias) is >= 0 and var alternate ? alternate : null;
+    }
 
     // ---------- JSON helpers (case-tolerant, never throw) ----------
 
@@ -570,7 +563,7 @@ public static class MatchDetailsParser
         {
             case JsonValueKind.Number:
                 if (value.TryGetInt64(out var l)) return l;
-                if (value.TryGetDouble(out var d) && double.IsFinite(d) && Math.Floor(d) == d && Math.Abs(d) < 9.0e18)
+                if (value.TryGetDouble(out var d) && double.IsFinite(d) && double.IsInteger(d) && Math.Abs(d) < 9.0e18)
                     return (long)d;
                 return null;
             case JsonValueKind.String:
@@ -664,59 +657,9 @@ public static class MatchAnalyticsEngine
         var summaries = new List<RoundSummary>(match.Rounds.Count);
         for (var index = 0; index < match.Rounds.Count; index++)
         {
-            var round = match.Rounds[index];
-
-            foreach (var subject in round.ParticipantSubjects)
-                if (accumulators.TryGetValue(subject, out var participant))
-                    participant.RoundsAppeared++;
-
-            foreach (var hit in round.Damage)
-            {
-                if (!IsOpponentInteraction(hit.Dealer, hit.Receiver, teamOf)) continue;
-                if (accumulators.TryGetValue(hit.Dealer, out var dealer))
-                {
-                    dealer.DamageDealt += hit.Damage;
-                    dealer.HeadHits += hit.Headshots;
-                    dealer.BodyHits += hit.Bodyshots;
-                    dealer.LegHits += hit.Legshots;
-                }
-                if (accumulators.TryGetValue(hit.Receiver, out var receiver))
-                    receiver.DamageReceived += hit.Damage;
-            }
-
-            var killsByTeam = new SortedDictionary<string, int>(StringComparer.Ordinal);
-            foreach (var kill in round.Kills)
-            {
-                if (kill.Killer.Length == 0) continue;
-                var team = teamOf.TryGetValue(kill.Killer, out var t) ? t : "";
-                killsByTeam[team] = killsByTeam.TryGetValue(team, out var c) ? c + 1 : 1;
-
-                if (IsOpponentInteraction(kill.Killer, kill.Victim, teamOf) && accumulators.TryGetValue(kill.Killer, out var killer))
-                    killer.WeaponKills[kill.DamageItem] = killer.WeaponKills.TryGetValue(kill.DamageItem, out var w) ? w + 1 : 1;
-            }
-
-            var first = FirstKill(round, teamOf);
-            if (first is not null)
-            {
-                hasTimeline = true;
-                if (accumulators.TryGetValue(first.Victim, out var victim))
-                    victim.FirstDeaths++;
-                if (accumulators.TryGetValue(first.Killer, out var opener))
-                    opener.FirstKills++;
-            }
-
-            summaries.Add(new RoundSummary(
-                index,
-                round.RoundNum,
-                round.RoundResult,
-                round.WinningTeam,
-                round.WinningTeamRole,
-                round.Kills.Count,
-                first?.Killer,
-                first?.Victim,
-                first?.TimeSinceRoundStartMillis,
-                first?.DamageItem,
-                killsByTeam));
+            var summary = AnalyzeRound(match.Rounds[index], index, teamOf, accumulators);
+            hasTimeline |= summary.FirstKiller is not null;
+            summaries.Add(summary);
         }
 
         var teams = BuildTeams(match);
@@ -729,6 +672,56 @@ public static class MatchAnalyticsEngine
             .ToArray();
 
         return new MatchAnalytics(match, teams, players, summaries, match.Rounds.Count, hasDamage, hasTimeline);
+    }
+
+    private static RoundSummary AnalyzeRound(RoundResultData round, int index,
+        IReadOnlyDictionary<string, string> teamOf, Dictionary<string, PlayerAccumulator> accumulators)
+    {
+        foreach (var subject in round.ParticipantSubjects)
+            if (accumulators.TryGetValue(subject, out var participant)) participant.RoundsAppeared++;
+        AccumulateDamage(round, teamOf, accumulators);
+        var killsByTeam = CountRoundKills(round, teamOf, accumulators);
+        var first = FirstKill(round, teamOf);
+        if (first is not null)
+        {
+            if (accumulators.TryGetValue(first.Victim, out var victim)) victim.FirstDeaths++;
+            if (accumulators.TryGetValue(first.Killer, out var opener)) opener.FirstKills++;
+        }
+        return new RoundSummary(index, round.RoundNum, round.RoundResult, round.WinningTeam,
+            round.WinningTeamRole, round.Kills.Count, first?.Killer, first?.Victim,
+            first?.TimeSinceRoundStartMillis, first?.DamageItem, killsByTeam);
+    }
+
+    private static void AccumulateDamage(RoundResultData round, IReadOnlyDictionary<string, string> teamOf,
+        Dictionary<string, PlayerAccumulator> accumulators)
+    {
+        foreach (var hit in round.Damage)
+        {
+            if (!IsOpponentInteraction(hit.Dealer, hit.Receiver, teamOf)) continue;
+            if (accumulators.TryGetValue(hit.Dealer, out var dealer))
+            {
+                dealer.DamageDealt += hit.Damage;
+                dealer.HeadHits += hit.Headshots;
+                dealer.BodyHits += hit.Bodyshots;
+                dealer.LegHits += hit.Legshots;
+            }
+            if (accumulators.TryGetValue(hit.Receiver, out var receiver)) receiver.DamageReceived += hit.Damage;
+        }
+    }
+
+    private static SortedDictionary<string, int> CountRoundKills(RoundResultData round,
+        IReadOnlyDictionary<string, string> teamOf, Dictionary<string, PlayerAccumulator> accumulators)
+    {
+        var killsByTeam = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        foreach (var kill in round.Kills)
+        {
+            if (kill.Killer.Length == 0) continue;
+            var team = teamOf.TryGetValue(kill.Killer, out var teamId) ? teamId : "";
+            killsByTeam[team] = killsByTeam.TryGetValue(team, out var count) ? count + 1 : 1;
+            if (IsOpponentInteraction(kill.Killer, kill.Victim, teamOf) && accumulators.TryGetValue(kill.Killer, out var killer))
+                killer.WeaponKills[kill.DamageItem] = killer.WeaponKills.TryGetValue(kill.DamageItem, out var countForWeapon) ? countForWeapon + 1 : 1;
+        }
+        return killsByTeam;
     }
 
     private static RoundKillData? FirstKill(RoundResultData round, IReadOnlyDictionary<string, string> teamOf)
@@ -912,37 +905,13 @@ public static class MatchAnalyticsEngine
         ArgumentNullException.ThrowIfNull(analyses);
         subject = (subject ?? "").Trim();
 
-        var seenMatchIds = new HashSet<string>(IdComparer);
-        var entries = new List<PlayerHistoryEntry>();
-        foreach (var analysis in analyses)
-        {
-            if (analysis is null) continue;
-            var info = analysis.Info;
-            if (!string.IsNullOrEmpty(queueId) && !IdComparer.Equals(info.QueueId, queueId)) continue;
-            var stats = analysis.FindPlayer(subject);
-            if (stats is null) continue;
-            if (info.MatchId.Length > 0 && !seenMatchIds.Add(info.MatchId)) continue;
-            entries.Add(new PlayerHistoryEntry(info.MatchId, info.MapId, info.QueueId, info.GameStartMillis, stats));
-        }
-
-        var ordered = entries
+        var ordered = HistoryEntries(analyses, subject, queueId)
             .OrderByDescending(e => e.GameStartMillis.HasValue)
             .ThenByDescending(e => e.GameStartMillis ?? 0)
             .ThenBy(e => e.MatchId, StringComparer.Ordinal)
             .ToArray();
 
         var tally = Tally(ordered);
-
-        long totalKills = 0, totalDeaths = 0;
-        var kdSamples = 0;
-        foreach (var e in ordered)
-        {
-            if (e.Stats.Kills is not { } k || e.Stats.Deaths is not { } d || k < 0 || d < 0) continue;
-            totalKills += k;
-            totalDeaths += d;
-            kdSamples++;
-        }
-        double? overallKd = kdSamples == 0 ? null : totalDeaths == 0 ? totalKills : (double)totalKills / totalDeaths;
 
         return new PlayerHistorySummary(
             subject,
@@ -956,12 +925,45 @@ public static class MatchAnalyticsEngine
             Recent(ordered, RecentLongWindow),
             Mean(ordered.Select(e => e.Stats.AverageCombatScore)),
             Mean(ordered.Select(e => e.Stats.KillDeathRatio)),
-            overallKd,
+            OverallKillDeathRatio(ordered),
             Mean(ordered.Select(e => e.Stats.AverageDamagePerRound)),
             Mean(ordered.Select(e => e.Stats.HeadshotPercent)),
             Breakdown(ordered, e => e.MapId),
             Breakdown(ordered, e => e.Stats.CharacterId),
             ordered);
+    }
+
+    private static List<PlayerHistoryEntry> HistoryEntries(IEnumerable<MatchAnalytics> analyses, string subject, string? queueId)
+    {
+        var seenMatchIds = new HashSet<string>(IdComparer);
+        var entries = new List<PlayerHistoryEntry>();
+        foreach (var analysis in analyses)
+        {
+            if (analysis is null) continue;
+            var info = analysis.Info;
+            var effectiveQueue = DisplayQueueId(analysis.Match);
+            if (!string.IsNullOrEmpty(queueId) && !IdComparer.Equals(effectiveQueue, queueId) && !IdComparer.Equals(info.QueueId, queueId)) continue;
+            var stats = analysis.FindPlayer(subject);
+            if (stats is null) continue;
+            if (info.MatchId.Length > 0 && !seenMatchIds.Add(info.MatchId)) continue;
+            entries.Add(new PlayerHistoryEntry(info.MatchId, info.MapId, effectiveQueue, info.GameStartMillis, stats));
+        }
+        return entries;
+    }
+
+    private static double? OverallKillDeathRatio(IEnumerable<PlayerHistoryEntry> entries)
+    {
+        long totalKills = 0, totalDeaths = 0;
+        var samples = 0;
+        foreach (var entry in entries)
+        {
+            if (entry.Stats.Kills is not { } kills || entry.Stats.Deaths is not { } deaths || kills < 0 || deaths < 0) continue;
+            totalKills += kills;
+            totalDeaths += deaths;
+            samples++;
+        }
+        if (samples == 0) return null;
+        return totalDeaths == 0 ? totalKills : (double)totalKills / totalDeaths;
     }
 
     private static RecentWinRate Recent(IReadOnlyList<PlayerHistoryEntry> newestFirst, int window)

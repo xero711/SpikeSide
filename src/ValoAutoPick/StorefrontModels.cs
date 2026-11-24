@@ -90,7 +90,8 @@ public static class StorefrontParser
     private static StorefrontOfferSection ReadAccessories(JsonElement root)
     {
         const string path = RootPath + ".AccessoryStore";
-        var store = RequireProperty(root, "AccessoryStore", RootPath, JsonValueKind.Object);
+        if (OptionalProperty(root, "AccessoryStore", RootPath, JsonValueKind.Object) is not { } store)
+            return new StorefrontOfferSection([], 0);
         var offers = ReadArray(store, "AccessoryStoreOffers", path, (entry, entryPath) =>
         {
             RequireKind(entry, JsonValueKind.Object, entryPath);
@@ -214,7 +215,7 @@ public static class StorefrontParser
     private static IReadOnlyList<T> ReadArray<T>(JsonElement parent, string name, string parentPath, Func<JsonElement, string, T> read)
     {
         var arrayPath = Join(parentPath, name);
-        var array = RequireProperty(parent, name, parentPath, JsonValueKind.Array);
+        if (OptionalProperty(parent, name, parentPath, JsonValueKind.Array) is not { } array) return Array.Empty<T>();
         var result = new List<T>(array.GetArrayLength());
         var index = 0;
         foreach (var entry in array.EnumerateArray()) result.Add(read(entry, $"{arrayPath}[{index++}]"));

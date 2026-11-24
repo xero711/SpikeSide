@@ -6,6 +6,79 @@ using System.Runtime.InteropServices;
 
 namespace ValoAutoPick;
 
+// WinForms SuspendLayout does not stop child windows from painting while a page is rebuilt.
+// Use only around synchronous UI updates; never hold this across an await.
+internal sealed class PageRedrawScope : IDisposable
+{
+    [ThreadStatic] private static Dictionary<IntPtr, int>? depths;
+    [ThreadStatic] private static HashSet<Control>? suspendedControls;
+    private readonly Control control;
+    private readonly IntPtr handle;
+    private bool disposed;
+    private PageRedrawScope(Control control)
+    {
+        this.control = control;
+        if (control.IsHandleCreated && !control.IsDisposed)
+        {
+            for (var ancestor = control.Parent; ancestor is not null; ancestor = ancestor.Parent)
+                if (suspendedControls?.Contains(ancestor) == true) return;
+            // Do not force a parent repaint while one of its descendants is
+            // still suspended: that would temporarily erase the child window.
+            if (suspendedControls?.Any(child => control.Contains(child)) == true) return;
+            var candidate = control.Handle;
+            depths ??= new Dictionary<IntPtr, int>();
+            if (depths.TryGetValue(candidate, out var depth))
+            {
+                handle = candidate;
+                depths[candidate] = depth + 1;
+            }
+            else if (control.Visible)
+            {
+                handle = candidate;
+                depths[candidate] = 1;
+                (suspendedControls ??= []).Add(control);
+                SendMessage(handle, 0x000B, IntPtr.Zero, IntPtr.Zero); // WM_SETREDRAW
+            }
+        }
+    }
+    internal static PageRedrawScope Begin(Control control) => new(control);
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+        if (handle == IntPtr.Zero || depths is null || !depths.TryGetValue(handle, out var depth)) return;
+        if (depth > 1) { depths[handle] = depth - 1; return; }
+        depths.Remove(handle);
+        suspendedControls?.Remove(control);
+        if (control.IsDisposed || !control.IsHandleCreated || control.Handle != handle || !control.Visible) return;
+        SendMessage(handle, 0x000B, new IntPtr(1), IntPtr.Zero);
+        // Erase the entire old surface as well as invalidating its remaining children. Otherwise
+        // removed rows can leave their pixels behind when a shorter page replaces them.
+        RedrawWindow(handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400);
+    }
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr handle, int message, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll")]
+    private static extern bool RedrawWindow(IntPtr handle, IntPtr updateRect, IntPtr updateRegion, uint flags);
+}
+
+internal static class SharedFonts
+{
+    private static readonly object Gate = new();
+    private static readonly Dictionary<(string Family, float Size, FontStyle Style), Font> Cache = [];
+
+    internal static Font Get(string family, float size, FontStyle style = FontStyle.Regular)
+    {
+        lock (Gate)
+        {
+            var key = (family, size, style);
+            if (!Cache.TryGetValue(key, out var font))
+                Cache[key] = font = new Font(family, size, style);
+            return font;
+        }
+    }
+}
+
 internal static class NativePageStyle
 {
     private static readonly object ErrorLogGate = new();
@@ -19,6 +92,10 @@ internal static class NativePageStyle
     internal static readonly Font Heading = new("Yu Gothic UI", 18f, FontStyle.Bold);
     internal static readonly Font Subheading = new("Yu Gothic UI", 12f, FontStyle.Bold);
     internal static readonly Font Metric = new("Segoe UI", 17f, FontStyle.Bold);
+    // Segoe UI digits are tabular (equal width), so right-aligned numbers line up column by column.
+    internal static readonly Font Numeric = new("Segoe UI", UiMetrics.FontSize(8.5f));
+    internal static readonly Font NumericBold = new("Segoe UI", UiMetrics.FontSize(8.5f), FontStyle.Bold);
+    internal static readonly Font SmallStrikeout = new("Yu Gothic UI", UiMetrics.FontSize(8.5f), FontStyle.Strikeout);
 
     internal static Label Label(string text, Font? font = null, Color? color = null) => new()
     {
@@ -43,13 +120,13 @@ internal static class NativePageStyle
         return Math.Max(1, measured.Height) + UiMetrics.Px(control, verticalPadding);
     }
 
-    internal static RoundedCard Card() => new()
+    internal static RoundedCard Card()
     {
-        Dock = DockStyle.Fill,
-        BackColor = Theme.Background,
-        Padding = new Padding(12),
-        Margin = new Padding(5)
-    };
+        var card = new RoundedCard { Dock = DockStyle.Fill, BackColor = Theme.Background };
+        card.Padding = new Padding(UiMetrics.Px(card, UiMetrics.CardInset));
+        card.Margin = new Padding(UiMetrics.Px(card, UiMetrics.TightGap));
+        return card;
+    }
 
     internal static void LogPageError(string page, Exception error)
     {
@@ -87,6 +164,12 @@ internal abstract class SkeletonSurface : Control
     protected bool SkeletonVisible => skeletonVisible;
     protected float AnimationPhase => (Environment.TickCount64 - shimmerStartedAt) % ShimmerCycle / (float)ShimmerCycle;
 
+    /// <summary>
+    /// When true, the placeholder appears as soon as loading starts instead of after the reveal delay.
+    /// Used for user-initiated waits where immediate feedback matters more than avoiding a flash.
+    /// </summary>
+    protected virtual bool ImmediateReveal => false;
+
     protected SkeletonSurface()
     {
         AccessibleRole = AccessibleRole.Default;
@@ -99,7 +182,7 @@ internal abstract class SkeletonSurface : Control
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    internal bool Loading
+    internal virtual bool Loading
     {
         get => loading;
         set
@@ -112,7 +195,13 @@ internal abstract class SkeletonSurface : Control
             if (loading)
             {
                 AccessibleName = "コンテンツを読み込み中";
-                revealTimer.Start();
+                if (ImmediateReveal)
+                {
+                    skeletonVisible = true;
+                    shimmerStartedAt = Environment.TickCount64;
+                    SyncShimmer();
+                }
+                else revealTimer.Start();
             }
             else AccessibleName = string.Empty;
             Invalidate();
@@ -156,17 +245,21 @@ internal abstract class SkeletonSurface : Control
 
     protected void DrawSkeletonBlock(Graphics graphics, Rectangle bounds, int radius = 7)
     {
-        if (!skeletonVisible || bounds.Width < 2 || bounds.Height < 2) return;
+        // During the reveal delay a static surface is drawn so the area never flashes empty;
+        // the moving shimmer only starts once the skeleton is formally revealed.
+        if (!(loading || skeletonVisible) || bounds.Width < 2 || bounds.Height < 2) return;
         bounds = Rectangle.Intersect(ClientRectangle, bounds);
         if (bounds.Width < 2 || bounds.Height < 2) return;
         using var path = ThemedButton.Rounded(new Rectangle(bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1),
             Math.Min(UiMetrics.Px(this, radius), Math.Min(bounds.Width, bounds.Height) / 2));
         using (var fill = new SolidBrush(Theme.Elevated)) graphics.FillPath(fill, path);
 
-        if (!shimmerTimer.Enabled) return;
-        var phase = AnimationPhase;
+        if (!skeletonVisible || !shimmerTimer.Enabled) return;
+        // Offset by horizontal position so neighbouring cards shimmer as one left-to-right wave.
+        var spatialOffset = (Left + (Parent?.Left ?? 0)) * 2L;
+        var rawPhase = ((Environment.TickCount64 - shimmerStartedAt - spatialOffset) % ShimmerCycle + ShimmerCycle) % ShimmerCycle / (float)ShimmerCycle;
         var bandWidth = Math.Clamp(bounds.Width / 3, UiMetrics.Px(this, 24), UiMetrics.Px(this, 120));
-        var bandX = bounds.Left - bandWidth + (int)Math.Round((bounds.Width + bandWidth) * phase);
+        var bandX = bounds.Left - bandWidth + (int)Math.Round((bounds.Width + bandWidth) * rawPhase);
         var band = new Rectangle(bandX, bounds.Top, bandWidth, bounds.Height);
         var state = graphics.Save();
         graphics.SetClip(path);
@@ -208,7 +301,7 @@ internal sealed class SkeletonScreen : SkeletonSurface
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    internal new bool Loading
+    internal override bool Loading
     {
         get => base.Loading;
         set
@@ -217,6 +310,8 @@ internal sealed class SkeletonScreen : SkeletonSurface
             Visible = value;
         }
     }
+
+    protected override bool ImmediateReveal => layout == SkeletonLayout.MediaPreview;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal string LoadingMessage
@@ -248,7 +343,7 @@ internal sealed class SkeletonScreen : SkeletonSurface
     {
         var bounds = Rectangle.Inflate(ClientRectangle, -UiMetrics.Px(this, 5), -UiMetrics.Px(this, 5));
         var gap = UiMetrics.Px(this, 8);
-        var leftWidth = Math.Max(UiMetrics.Px(this, 190), (bounds.Width - gap) * 36 / 100);
+        var leftWidth = Math.Max(UiMetrics.Px(this, 190), (bounds.Width - gap) * 30 / 100);
         var left = new Rectangle(bounds.X, bounds.Y, leftWidth, bounds.Height);
         var right = new Rectangle(left.Right + gap, bounds.Y, Math.Max(0, bounds.Right - left.Right - gap), bounds.Height);
         DrawSurface(graphics, left);
@@ -286,11 +381,54 @@ internal sealed class SkeletonScreen : SkeletonSurface
         }
     }
 
-    private void PaintOfferGrid(Graphics graphics) =>
-        PaintGrid(graphics, preferredCardWidth: 190, preferredCardHeight: 250, maxColumns: 4, maxRows: 2, imageRatio: .55f);
+    // Mirrors ResponsiveCardGrid (PreferredAspect 1.5, 10px gap) for the four daily offers so the
+    // placeholders sit where the real cards will land.
+    private void PaintOfferGrid(Graphics graphics)
+    {
+        const int count = 4;
+        const double aspect = 1.5;
+        var gap = UiMetrics.Px(this, 10);
+        var area = ClientRectangle;
+        if (area.Width <= 0 || area.Height <= 0) return;
+
+        var rows = 2;
+        var bestScore = double.MinValue;
+        for (var candidate = 1; candidate <= count; candidate++)
+        {
+            var candidateColumns = (count + candidate - 1) / candidate;
+            var width = (area.Width - gap * (candidateColumns - 1)) / (double)candidateColumns;
+            var height = (area.Height - gap * (candidate - 1)) / (double)candidate;
+            if (width <= 0 || height <= 0) continue;
+            var fit = Math.Min(width, height * aspect);
+            var score = count % candidate == 0 ? fit : fit * 0.85;
+            if (score > bestScore) { bestScore = score; rows = candidate; }
+        }
+        var columns = (count + rows - 1) / rows;
+        var cardWidth = Math.Max(1, (area.Width - gap * (columns - 1)) / columns);
+        var cardHeight = Math.Max(1, (area.Height - gap * (rows - 1)) / rows);
+        var line = UiMetrics.Px(this, 12);
+        var cardInset = UiMetrics.Px(this, 9);
+        var lineGap = UiMetrics.Px(this, 6);
+        for (var index = 0; index < count; index++)
+        {
+            var row = index / columns;
+            var column = index % columns;
+            var card = new Rectangle(area.X + column * (cardWidth + gap), area.Y + row * (cardHeight + gap), cardWidth, cardHeight);
+            DrawSurface(graphics, card);
+            DrawSkeletonBlock(graphics, new Rectangle(card.X + cardInset, card.Y + cardInset, card.Width * 3 / 5, line), 5);
+            var priceY = card.Bottom - cardInset - line;
+            var weaponY = priceY - lineGap - line;
+            var imageTop = card.Y + cardInset + line + lineGap;
+            var imageBottom = weaponY - lineGap;
+            if (imageBottom - imageTop >= line)
+                DrawSkeletonBlock(graphics, new Rectangle(card.X + cardInset, imageTop, card.Width - cardInset * 2, imageBottom - imageTop), 7);
+            DrawSkeletonBlock(graphics, new Rectangle(card.X + cardInset, weaponY, card.Width * 2 / 5, line), 5);
+            DrawSkeletonBlock(graphics, new Rectangle(card.X + cardInset, priceY, card.Width / 4, line), 5);
+        }
+    }
 
     private void PaintCatalogGrid(Graphics graphics) =>
-        PaintGrid(graphics, preferredCardWidth: 160, preferredCardHeight: 210, maxColumns: 4, maxRows: 3, imageRatio: .62f);
+        PaintGrid(graphics, preferredCardWidth: 220, preferredCardHeight: 185, maxColumns: 6, maxRows: 3, imageRatio: .60f);
 
     private void PaintMediaPreview(Graphics graphics)
     {
@@ -308,14 +446,14 @@ internal sealed class SkeletonScreen : SkeletonSurface
             graphics.DrawArc(arc, ring, -90 + (int)Math.Round(AnimationPhase * 360), 265);
 
         var labelBounds = new Rectangle(0, ring.Bottom + UiMetrics.Px(this, 10), ClientSize.Width, UiMetrics.Px(this, 28));
-        TextRenderer.DrawText(graphics, loadingMessage, Font, labelBounds, Theme.Text,
+        TextRenderer.DrawText(graphics, loadingMessage, Font, labelBounds, Color.FromArgb(244, 246, 250),
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
     }
 
     private void PaintGrid(Graphics graphics, int preferredCardWidth, int preferredCardHeight, int maxColumns, int maxRows, float imageRatio)
     {
-        var inset = UiMetrics.Px(this, 8);
-        var gap = UiMetrics.Px(this, 8);
+        var inset = UiMetrics.Px(this, UiMetrics.TightGap * 2);
+        var gap = UiMetrics.Px(this, UiMetrics.ControlGap);
         var areaWidth = Math.Max(0, ClientSize.Width - inset * 2);
         var areaHeight = Math.Max(0, ClientSize.Height - inset * 2);
         if (areaWidth <= 0 || areaHeight <= 0) return;
@@ -333,7 +471,7 @@ internal sealed class SkeletonScreen : SkeletonSurface
             var y = inset + row * (cardHeight + gap);
             var card = new Rectangle(x, y, cardWidth, cardHeight);
             DrawSurface(graphics, card);
-            var cardInset = UiMetrics.Px(this, 9);
+            var cardInset = UiMetrics.Px(this, UiMetrics.ContentGap);
             DrawSkeletonBlock(graphics, new Rectangle(card.X + cardInset, card.Y + cardInset, card.Width * 3 / 5, line), 5);
             var imageTop = card.Y + cardInset + line + gap;
             var imageHeight = Math.Max(line * 3, (int)((card.Height - cardInset * 2) * imageRatio));
@@ -347,11 +485,135 @@ internal sealed class SkeletonScreen : SkeletonSurface
     private void DrawSurface(Graphics graphics, Rectangle bounds)
     {
         if (bounds.Width < 2 || bounds.Height < 2) return;
-        using var path = ThemedButton.Rounded(new Rectangle(bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1), UiMetrics.Px(this, 8));
+        using var path = ThemedButton.Rounded(new Rectangle(bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1), UiMetrics.Px(this, UiMetrics.CornerRadius));
         using var fill = new SolidBrush(Theme.Surface);
         using var border = new Pen(Theme.Border);
         graphics.FillPath(fill, path);
         graphics.DrawPath(border, path);
+    }
+}
+
+/// <summary>
+/// A small rotating accent for non-blocking background work (e.g. an inline status-row refresh).
+/// It only animates while active and visible, and honours the Windows animation setting.
+/// </summary>
+internal sealed class WaitingIndicator : Control
+{
+    private readonly System.Windows.Forms.Timer timer = new() { Interval = 32 };
+    private readonly int ringSize;
+    private readonly int textGap;
+    private readonly int showDelay;
+    private bool active;
+    private long startedAt;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool Active
+    {
+        get => active;
+        set
+        {
+            if (active == value) return;
+            active = value;
+            SyncTimer();
+            Invalidate();
+        }
+    }
+
+    // Logical px: ring diameter, optional inline text gap, and a short delay before the ring appears.
+    public WaitingIndicator(int ringSize = 14, int textGap = 6, int showDelay = 80)
+    {
+        this.ringSize = Math.Max(1, ringSize);
+        this.textGap = Math.Max(0, textGap);
+        this.showDelay = Math.Max(0, showDelay);
+        Size = new Size(this.ringSize + this.textGap, Math.Max(18, this.ringSize));
+        AccessibleName = "読み込み中";
+        AccessibleRole = AccessibleRole.ProgressBar;
+        BackColor = Theme.Background;
+        Margin = Padding.Empty;
+        TabStop = false;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+        timer.Tick += (_, _) =>
+        {
+            if (Environment.TickCount64 - startedAt >= this.showDelay)
+            {
+                if (!System.Windows.SystemParameters.ClientAreaAnimation) timer.Stop();
+                Invalidate();
+            }
+        };
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        SyncTimer();
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        UpdateSizeForDpi();
+        SyncTimer();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        UpdateSizeForDpi();
+    }
+
+    private void UpdateSizeForDpi()
+    {
+        var size = new Size(UiMetrics.Px(this, ringSize + textGap), UiMetrics.Px(this, Math.Max(18, ringSize)));
+        if (Size != size) Size = size;
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        timer.Stop();
+        base.OnHandleDestroyed(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        var elapsed = Environment.TickCount64 - startedAt - showDelay;
+        if (!active || elapsed < 0 || ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        var stroke = Math.Max(1.4f, DeviceDpi / 96f * 1.8f * ringSize / 14f);
+        // Always a true circle: the docked height (status row) differs from the width.
+        var box = Math.Min(UiMetrics.Px(this, ringSize), Math.Min(ClientSize.Width - UiMetrics.Px(this, textGap), ClientSize.Height));
+        var diameter = box - stroke - 1f;
+        if (diameter <= 0) return;
+        var bounds = new RectangleF(stroke / 2f + 0.5f, (ClientSize.Height - diameter) / 2f, diameter, diameter);
+        using var track = new Pen(Theme.Border, stroke);
+        using var arc = new Pen(Theme.Red, stroke) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        e.Graphics.DrawEllipse(track, bounds);
+        var angle = System.Windows.SystemParameters.ClientAreaAnimation ? (elapsed % 1000) * .36f : 0f;
+        e.Graphics.DrawArc(arc, bounds, angle, 105f);
+    }
+
+    private void SyncTimer()
+    {
+        if (active && Visible && IsHandleCreated)
+        {
+            if (!timer.Enabled)
+            {
+                startedAt = Environment.TickCount64;
+                timer.Start();
+            }
+        }
+        else timer.Stop();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            timer.Stop();
+            timer.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }
 
@@ -367,6 +629,40 @@ internal sealed class SharpImageBox : SkeletonSurface
     private Rectangle frameSource;
     private ImageFit fit = ImageFit.Contain;
     private string placeholderText = "";
+    private bool roundedCorners;
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool RoundedCorners
+    {
+        get => roundedCorners;
+        set { if (roundedCorners == value) return; roundedCorners = value; UpdateClipRegion(); }
+    }
+
+    private void UpdateClipRegion()
+    {
+        Region? next = null;
+        if (roundedCorners && ClientSize.Width > 1 && ClientSize.Height > 1)
+        {
+            using var path = ThemedButton.Rounded(ClientRectangle, UiMetrics.Px(this, UiMetrics.CornerRadius));
+            next = new Region(path);
+        }
+        var previous = Region;
+        Region = next;
+        previous?.Dispose();
+        Invalidate();
+    }
+
+    protected override void OnSizeChanged(EventArgs e)
+    {
+        base.OnSizeChanged(e);
+        UpdateClipRegion();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        UpdateClipRegion();
+    }
 
     public SharpImageBox()
     {
@@ -393,6 +689,9 @@ internal sealed class SharpImageBox : SkeletonSurface
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal bool DarkStage { get; set; }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Image? Image
     {
         get => image;
@@ -414,13 +713,13 @@ internal sealed class SharpImageBox : SkeletonSurface
         if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
         if (image is null)
         {
-            if (SkeletonVisible)
+            if (Loading || SkeletonVisible)
                 DrawSkeletonBlock(e.Graphics, ClientRectangle, radius: 7);
             else if (!Loading && !string.IsNullOrWhiteSpace(placeholderText))
             {
                 var inset = UiMetrics.Px(this, 8);
                 var bounds = Rectangle.Inflate(ClientRectangle, -inset, -inset);
-                TextRenderer.DrawText(e.Graphics, placeholderText, Font, bounds, Theme.Muted,
+                TextRenderer.DrawText(e.Graphics, placeholderText, Font, bounds, DarkStage ? Color.FromArgb(200, 212, 228) : Theme.Muted,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak |
                     TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
             }
@@ -436,6 +735,11 @@ internal sealed class SharpImageBox : SkeletonSurface
             frameSource = source;
         }
         var state = e.Graphics.Save();
+        if (roundedCorners && destination.Width > 1 && destination.Height > 1)
+        {
+            using var imagePath = ThemedButton.Rounded(destination, UiMetrics.Px(this, UiMetrics.CornerRadius));
+            e.Graphics.SetClip(imagePath, CombineMode.Intersect);
+        }
         e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
         e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
         e.Graphics.CompositingMode = CompositingMode.SourceOver;
@@ -450,6 +754,7 @@ internal sealed class SharpImageBox : SkeletonSurface
             ResetFrame();
             image?.Dispose();
             image = null;
+            ValoAutoPick.RoundedCorners.Release(this);
         }
         base.Dispose(disposing);
     }
@@ -594,7 +899,7 @@ internal sealed class ResponsiveCardGrid : Panel
 
 internal static class NativeImageCache
 {
-    private const int MaxCachedBytes = 32 * 1024 * 1024;
+    private const int MaxCachedBytes = 8 * 1024 * 1024;
     // valorant-api.com returns this valid PNG (a white X) for several Standard skin
     // image paths. Treat it as missing art so callers can continue to a real fallback.
     private const string MissingArtSha256 = "6E236924D463ED12ABA89C6B5C3DEC87F35AEB57AAC8B9068FE96377D113DE8F";
@@ -664,6 +969,7 @@ internal static class NativeImageCache
                     CacheBytes(uri.AbsoluteUri, bytes);
                 }
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
             {
                 return null;
@@ -699,7 +1005,16 @@ internal static class NativeImageCache
 
     private static HttpClient CreateClient()
     {
-        var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+        var handler = new SocketsHttpHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate | System.Net.DecompressionMethods.Brotli,
+            PooledConnectionLifetime = TimeSpan.FromMinutes(10)
+        };
+        var client = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+            MaxResponseContentBufferSize = 8 * 1024 * 1024
+        };
         client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SpikeSide", typeof(NativeImageCache).Assembly.GetName().Version!.ToString(3)));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("image/*"));
         return client;
@@ -717,14 +1032,16 @@ internal static class NativeVideoCache
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "QuickPickerPro", "VideoCache");
 
-    internal static async Task<string?> GetLocalFileAsync(string? source, CancellationToken cancellationToken)
+    /// <param name="progress">Optional download progress: bytes received and the total when the server reports it.
+    /// Not reported for a file that is already cached.</param>
+    internal static async Task<string?> GetLocalFileAsync(string? source, CancellationToken cancellationToken,
+        IProgress<(long Received, long? Total)>? progress = null)
     {
         if (!Uri.TryCreate(source, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
             uri.Host is not "valorant.dyn.riotcdn.net" || !uri.AbsolutePath.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        var fileName = Path.GetFileName(uri.AbsolutePath);
-        if (fileName.Length == 0 || fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+        var fileName = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(uri.AbsoluteUri))) + ".mp4";
         var destination = Path.Combine(CacheDirectory, fileName);
         if (IsCached(destination)) return destination;
 
@@ -743,7 +1060,9 @@ internal static class NativeVideoCache
             await using (var output = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
                 var buffer = new byte[81920];
-                long total = 0;
+                long total = 0, lastReported = 0;
+                long? expected = response.Content.Headers.ContentLength is > 0 ? response.Content.Headers.ContentLength : null;
+                progress?.Report((0, expected));
                 while (true)
                 {
                     var read = await input.ReadAsync(buffer.AsMemory(), cancellationToken);
@@ -751,7 +1070,14 @@ internal static class NativeVideoCache
                     total += read;
                     if (total > MaxVideoBytes) return null;
                     await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                    // Throttled so the UI thread only repaints a few times per megabyte.
+                    if (progress != null && total - lastReported >= 256 * 1024)
+                    {
+                        lastReported = total;
+                        progress.Report((total, expected));
+                    }
                 }
+                progress?.Report((total, expected));
                 await output.FlushAsync(cancellationToken);
             }
 
@@ -765,7 +1091,12 @@ internal static class NativeVideoCache
         catch (Exception ex) when (ex is HttpRequestException or IOException or UnauthorizedAccessException) { return null; }
         finally
         {
-            if (temporaryPath is not null) { try { File.Delete(temporaryPath); } catch (IOException) { } }
+            if (temporaryPath is not null)
+            {
+                try { File.Delete(temporaryPath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
             Downloads.Release();
         }
     }
@@ -776,7 +1107,8 @@ internal static class NativeVideoCache
         {
             var info = new FileInfo(path);
             if (!info.Exists || info.Length == 0 || info.Length > MaxVideoBytes) return false;
-            info.LastAccessTimeUtc = DateTime.UtcNow;
+            try { info.LastAccessTimeUtc = DateTime.UtcNow; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             return true;
         }
         catch (IOException) { return false; }

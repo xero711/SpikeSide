@@ -46,31 +46,32 @@ public static class AgentCatalog
         var order = new List<string>();
         var byId = new Dictionary<string, Agent>(StringComparer.OrdinalIgnoreCase);
         var baseIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        void Add(Agent? candidate, bool isTrusted)
-        {
-            var agent = Normalize(candidate, isTrusted);
-            if (agent == null) return;
-            if (agent.IsBaseContent) baseIds.Add(agent.Id);
-            if (byId.TryGetValue(agent.Id, out var existing))
-            {
-                byId[agent.Id] = existing with
-                {
-                    Name = agent.Name,
-                    Role = agent.Role.Length > 0 ? agent.Role : existing.Role,
-                    RoleIconId = agent.RoleIconId.Length > 0 ? agent.RoleIconId : existing.RoleIconId
-                };
-            }
-            else if (order.Count < MaximumAgents)
-            {
-                order.Add(agent.Id);
-                byId[agent.Id] = agent;
-            }
-        }
-        foreach (var agent in trusted) Add(agent, isTrusted: true);
-        foreach (var overlay in overlays)
-            if (overlay != null)
-                foreach (var agent in overlay) Add(agent, isTrusted: false);
+        foreach (var agent in trusted) AddMergedAgent(agent, true, order, byId, baseIds);
+        foreach (var overlay in overlays.OfType<IEnumerable<Agent?>>())
+            foreach (var agent in overlay) AddMergedAgent(agent, false, order, byId, baseIds);
         return order.Select(id => byId[id] with { IsBaseContent = baseIds.Contains(id) }).ToList();
+    }
+
+    private static void AddMergedAgent(Agent? candidate, bool trusted, List<string> order,
+        Dictionary<string, Agent> byId, HashSet<string> baseIds)
+    {
+        var agent = Normalize(candidate, trusted);
+        if (agent == null) return;
+        if (agent.IsBaseContent) baseIds.Add(agent.Id);
+        if (byId.TryGetValue(agent.Id, out var existing))
+        {
+            byId[agent.Id] = existing with
+            {
+                Name = agent.Name,
+                Role = agent.Role.Length > 0 ? agent.Role : existing.Role,
+                RoleIconId = agent.RoleIconId.Length > 0 ? agent.RoleIconId : existing.RoleIconId
+            };
+        }
+        else if (order.Count < MaximumAgents)
+        {
+            order.Add(agent.Id);
+            byId[agent.Id] = agent;
+        }
     }
 
     /// <summary>
@@ -115,19 +116,23 @@ public static class AgentCatalog
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var item in data.EnumerateArray())
         {
-            if (item.ValueKind != JsonValueKind.Object) continue;
-            // The catalogue includes non-playable duplicates; only explicitly playable agents are accepted.
-            if (Property(item, "isPlayableCharacter").ValueKind != JsonValueKind.True) continue;
-            var role = Property(item, "role");
-            var agent = Normalize(new Agent(Text(item, "uuid"), Text(item, "displayName"),
-                role.ValueKind == JsonValueKind.Object ? Text(role, "displayName") : "",
-                role.ValueKind == JsonValueKind.Object ? Text(role, "uuid") : ""));
+            var agent = ParseRemoteAgent(item);
             if (agent == null || !seen.Add(agent.Id)) continue;
             result.Add(agent);
             if (result.Count > MaximumAgents) throw new InvalidDataException("エージェント一覧が大きすぎます");
         }
         if (result.Count < MinimumRemoteAgents) throw new InvalidDataException("エージェント一覧が不完全です");
         return result;
+    }
+
+    private static Agent? ParseRemoteAgent(JsonElement item)
+    {
+        // The catalogue includes non-playable duplicates; accept only explicitly playable agents.
+        if (item.ValueKind != JsonValueKind.Object || Property(item, "isPlayableCharacter").ValueKind != JsonValueKind.True) return null;
+        var role = Property(item, "role");
+        return Normalize(new Agent(Text(item, "uuid"), Text(item, "displayName"),
+            role.ValueKind == JsonValueKind.Object ? Text(role, "displayName") : "",
+            role.ValueKind == JsonValueKind.Object ? Text(role, "uuid") : ""));
     }
 
     /// <summary>Reads the cache file; returns null when it does not exist.</summary>
@@ -163,7 +168,10 @@ public static class AgentCatalog
         finally
         {
             try { if (File.Exists(temporary)) File.Delete(temporary); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Cleanup is best-effort; preserve the original save result.
+            }
         }
     }
 
@@ -176,7 +184,10 @@ public static class AgentCatalog
     {
         List<Agent>? onDisk = null;
         try { onDisk = ReadCache(path); }
-        catch (Exception e) when (e is JsonException or InvalidDataException) { }
+        catch (Exception e) when (e is JsonException or InvalidDataException)
+        {
+            // A damaged cache is replaced by the merged catalogue below.
+        }
         var merged = Merge([], knownCache, onDisk, remote);
         if (onDisk == null || !merged.SequenceEqual(onDisk)) WriteCacheAtomic(path, merged);
         return merged;

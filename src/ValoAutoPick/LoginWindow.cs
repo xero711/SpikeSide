@@ -14,10 +14,10 @@ public sealed class LoginWindow : DarkForm
         Height = 88,
         Padding = new Padding(14, 8, 14, 8),
         TextAlign = ContentAlignment.MiddleLeft,
-        Font = new Font("Yu Gothic UI", 10.5f),
+        Font = SharedFonts.Get("Yu Gothic UI", 10.5f),
         Text = "Googleログインは上のボタンを使ってください。\nRiotのログイン画面を読み込み中…",
-        BackColor = Color.FromArgb(20, 26, 37),
-        ForeColor = Color.White
+        BackColor = Theme.Surface,
+        ForeColor = Theme.Text
     };
     private TaskCompletionSource<AuthResult?>? pending;
     private string state = "";
@@ -32,7 +32,7 @@ public sealed class LoginWindow : DarkForm
     public LoginWindow()
     {
         Text = "Riot アカウントでログイン"; Size = new(560, 780); MinimumSize = new(480, 650); StartPosition = FormStartPosition.CenterParent;
-        var googleBar = new Panel { Dock = DockStyle.Top, Height = 62, Padding = new Padding(14, 7, 14, 7), BackColor = Color.FromArgb(20, 26, 37) };
+        var googleBar = new Panel { Dock = DockStyle.Top, Height = 62, Padding = new Padding(14, 7, 14, 7), BackColor = Theme.Surface };
         googleBar.Controls.Add(googleLogin);
         Controls.Add(browser); Controls.Add(status); Controls.Add(googleBar);
         googleLogin.Click += async (_, _) => await StartGoogleLogin();
@@ -54,7 +54,11 @@ public sealed class LoginWindow : DarkForm
         silent = silentLogin; state = AuthFlow.NewState(); authenticationToken = ct;
         pending = new(TaskCreationOptions.RunContinuationsAsynchronously);
         var task = pending.Task;
-        using var registration = ct.Register(() => { if (IsHandleCreated && !IsDisposed) BeginInvoke(() => Finish(null)); });
+        using var registration = ct.Register(() =>
+        {
+            try { if (IsHandleCreated && !IsDisposed && !Disposing) BeginInvoke(() => Finish(null)); }
+            catch (Exception e) when (e is ObjectDisposedException or InvalidOperationException) { }
+        });
         try
         {
             if (!silent) Show(owner);
@@ -63,9 +67,8 @@ public sealed class LoginWindow : DarkForm
             Configure(core);
             ct.ThrowIfCancellationRequested();
             core.Navigate(AuthFlow.Url(state, silent));
-            var timeout = Task.Delay(silent ? TimeSpan.FromSeconds(25) : TimeSpan.FromMinutes(10), ct);
-            if (await Task.WhenAny(task, timeout) != task) Finish(null);
-            return await task;
+            try { return await task.WaitAsync(silent ? TimeSpan.FromSeconds(25) : TimeSpan.FromMinutes(10), ct); }
+            catch (TimeoutException) { Finish(null); return null; }
         }
         catch { Finish(null); throw; }
     }
@@ -174,7 +177,7 @@ public sealed class LoginWindow : DarkForm
         { if (!IsDisposed) status.Text = "ブラウザーログインに必要なlocalhostのポート80を使用できません。"; }
         catch (BrowserIsolationException e)
         { if (!IsDisposed) status.Text = e.Message; }
-        catch (Exception e) when (e is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        catch (Exception e) when (e is InvalidOperationException or IOException or UnauthorizedAccessException or System.Security.SecurityException or System.ComponentModel.Win32Exception)
         { if (!IsDisposed) status.Text = "ブラウザーを開けませんでした。もう一度お試しください。"; }
         finally
         {
@@ -187,8 +190,11 @@ public sealed class LoginWindow : DarkForm
     {
         var completion = pending; pending = null;
         browserLoginStop?.Cancel();
-        foreach (var popup in popups.Values.ToArray()) popup.Close();
-        browser.CoreWebView2?.Stop(); Hide();
+        if (!IsDisposed && !Disposing)
+        {
+            foreach (var popup in popups.Values.ToArray()) if (!popup.IsDisposed) popup.Close();
+            browser.CoreWebView2?.Stop(); Hide();
+        }
         completion?.TrySetResult(result);
     }
     public async Task ClearSession()
@@ -201,7 +207,7 @@ public sealed class LoginWindow : DarkForm
         if (browser.CoreWebView2 == null) throw new InvalidOperationException("Browser not initialized");
         using var output = File.Create(path);
         await browser.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, output);
-        var source = new Uri(browser.Source.AbsoluteUri);
+        var source = browser.Source ?? throw new InvalidOperationException("Browser has no current page");
         // No query, fragment, page text, cookies, or credentials in diagnostics.
         File.WriteAllText(Path.ChangeExtension(path, ".txt"), "Login page host: " + source.Host + "\nHTTPS: " + (source.Scheme == "https"));
     }

@@ -18,33 +18,44 @@ public sealed class MainWindow : DarkForm
     private static readonly string[] RegionValues = ["auto", "ap", "na", "eu", "kr", "br", "latam", "pbe"];
     private readonly ThemedSelect region = RegionCombo();
     private readonly SwitchToggle autoStart = new("自動で監視開始", false);
-    private readonly ThemedButton login = new() { Text = "Riotにログイン", Size = new(176, 43), Compact = true };
+    private readonly ThemedButton login = new() { Text = "Riotにログイン", Size = new(176, UiMetrics.ButtonHeight), Compact = true };
     // Leave enough horizontal room for Japanese glyphs plus the button's text padding.
-    private readonly ThemedButton logout = new() { Text = "ログアウト", Size = new(119, 43), Compact = true };
-    private readonly ThemedButton dashboardTab = new() { Text = "ピック", Size = new(92, 43), Compact = true, Primary = true };
-    private readonly ThemedButton matchHistoryButton = new() { Text = "試合分析", Size = new(132, 43), Compact = true };
-    private readonly ThemedButton storeTab = new() { Text = "STORE", Size = new(104, 43), Compact = true };
+    private readonly ThemedButton logout = new() { Text = "ログアウト", Size = new(119, UiMetrics.ButtonHeight), Compact = true };
+    // Page navigation uses the Tab style so the coral fill stays reserved for the main action of each page.
+    private readonly ThemedButton dashboardTab = new() { Text = "ピック", Size = new(92, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab, Selected = true, AccessibleDescription = "Ctrl+1" };
+    private readonly ThemedButton matchHistoryButton = new() { Text = "試合分析", Size = new(132, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab, AccessibleDescription = "Ctrl+2" };
+    private readonly ThemedButton storeTab = new() { Text = "STORE", Size = new(104, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab, AccessibleDescription = "Ctrl+3" };
+    private readonly ThemedButton appSettings = new() { Text = "設定", Size = new(84, UiMetrics.ButtonHeight), Compact = true };
+    private readonly ToolTip shortcutTips = new() { InitialDelay = 600 };
+    // Window state to return to when reopened from the tray (minimizing hides the window).
+    private FormWindowState restoreState = FormWindowState.Normal;
     // MainWindow positions this page area below the header with ArrangeRoot.
     // Keeping Dock=Fill here makes WinForms cover the manually positioned header.
     private readonly Panel pageHost = new() { Dock = DockStyle.None, BackColor = Theme.Background };
-    private readonly ThemedButton start = new() { Text = "監視を開始", Primary = true, Font = new Font("Yu Gothic UI", 15.5f, FontStyle.Bold) };
-    private readonly ThemedButton autoQueue = new() { Text = "自動インキュー開始", Font = new Font("Yu Gothic UI", 13.5f, FontStyle.Bold), AccessibleDescription = "ゲーム内で選択中のモードに自動で参加します" };
+    private readonly ThemedButton start = new() { Text = "監視を開始", Primary = true, Font = SharedFonts.Get("Yu Gothic UI", 15.5f, FontStyle.Bold) };
+    private readonly ThemedButton autoQueue = new() { Text = "自動インキュー開始", Font = SharedFonts.Get("Yu Gothic UI", 13.5f, FontStyle.Bold), AccessibleDescription = "ゲーム内で選択中のモードに自動で参加します" };
     private readonly HeroPanel hero = new();
     private readonly RoundedCard settingsPanel = new() { Dock = DockStyle.Fill };
     private readonly RoundedCard mapSettingsCard = new() { Dock = DockStyle.Fill };
     private readonly MatchMapPanel matchMap = new() { Dock = DockStyle.Fill };
     private readonly Label mapSummary = new() { Dock = DockStyle.Fill, ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
-    private readonly Label trialRemaining = new() { Dock = DockStyle.Fill, ForeColor = Theme.Text, Font = new Font("Yu Gothic UI", 11, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty };
-    private readonly Label trialDescription = new() { Dock = DockStyle.Fill, ForeColor = Theme.Text, Font = new Font("Yu Gothic UI", 9.5f), TextAlign = ContentAlignment.TopLeft, Margin = Padding.Empty, Text = "1試合のピック試行で1回消費します。\nマップ別設定・自動インキューは利用不可" };
-    private readonly Label trialCorner = new() { ForeColor = Theme.Text, BackColor = Theme.Background, Font = new Font("Yu Gothic UI", 9, FontStyle.Bold), TextAlign = ContentAlignment.MiddleRight, AutoEllipsis = true, AccessibleName = "体験版の残り回数" };
+    private readonly Label trialRemaining = new() { Dock = DockStyle.Fill, ForeColor = Theme.Text, Font = SharedFonts.Get("Yu Gothic UI", 11, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, Margin = Padding.Empty };
+    private readonly Label trialDescription = new() { Dock = DockStyle.Fill, ForeColor = Theme.Text, Font = SharedFonts.Get("Yu Gothic UI", 9.5f), TextAlign = ContentAlignment.TopLeft, Margin = Padding.Empty, Text = "1試合のピック試行で1回消費します。\nマップ別設定・自動インキューは利用不可" };
+    private readonly Label trialCorner = new() { ForeColor = Theme.Text, BackColor = Theme.Background, Font = SharedFonts.Get("Yu Gothic UI", 9, FontStyle.Bold), TextAlign = ContentAlignment.MiddleRight, AutoEllipsis = true, AccessibleName = "体験版の残り回数" };
     private readonly TrialUsage trialUsage = TrialUsage.CreateDefault();
     private string displayedMap = "";
     private readonly RoundedCard startPanel = new() { Dock = DockStyle.Fill };
-    private readonly Label status = new() { Text = "停止中", ForeColor = Theme.Muted, Font = new Font("Yu Gothic UI", 8.2f, FontStyle.Bold), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
-    private readonly Label detail = new() { Text = "", ForeColor = Theme.Muted, Font = new Font("Yu Gothic UI", 8.2f), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
-    private readonly Label queueDetail = new() { Text = "自動インキューは停止中", ForeColor = Theme.Muted, Font = new Font("Yu Gothic UI", 8.2f), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
-    private readonly Label accountInfo = new() { Text = "Riotアカウント: 未接続", ForeColor = Theme.Muted, Font = new Font("Yu Gothic UI", 9.5f), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
-    private readonly NotifyIcon tray = new() { Icon = AppIcon.Create(), Text = "SpikeSide", Visible = true };
+    private readonly Label status = new() { Text = "停止中", ForeColor = Theme.Muted, Font = SharedFonts.Get("Yu Gothic UI", 8.2f, FontStyle.Bold), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
+    private readonly Label detail = new() { Text = "", ForeColor = Theme.Muted, Font = SharedFonts.Get("Yu Gothic UI", 8.2f), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
+    private readonly Label queueDetail = new() { Text = "自動インキューは停止中", ForeColor = Theme.Muted, Font = SharedFonts.Get("Yu Gothic UI", 8.2f), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
+    private readonly Label accountInfo = new() { Text = "Riotアカウント: 未接続", ForeColor = Theme.Muted, Font = SharedFonts.Get("Yu Gothic UI", 9.5f), AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill };
+    private readonly Icon trayIcon = AppIcon.Create();
+    private readonly NotifyIcon tray = new() { Text = Edition.DisplayName, Visible = true };
+    private readonly TrayContextMenu trayMenu = new();
+    private TrayStatusItem? trayStatus;
+    private TrayToggleItem? trayPickToggle;
+    private TrayToggleItem? trayQueueToggle;
+    private string trayWarningText = "";
     private readonly RiotApi api = new();
     private MatchHistoryControl? matchHistory;
     private StorePreviewControl? storePreview;
@@ -56,6 +67,7 @@ public sealed class MainWindow : DarkForm
     private CancellationTokenSource? refreshStop;
     private Task<bool>? accountRefresh;
     private Task? ownedLoad;
+    private Task? signInTask;
     private CancellationTokenSource? monitor;
     private Task? monitorTask;
     private Task? stopTask;
@@ -64,7 +76,9 @@ public sealed class MainWindow : DarkForm
     private AutoQueueEngine? queueEngine;
     private RelayOptions? relayOptions;
     private string engineSubject = "", lastStatus = "", lastQueueStatus = "";
-    private bool closing, busy, stopping, pickMonitoring, autoQueueActive, systemBrowserLogin, inputEnabled = true;
+    private bool closing, allowClose, busy, stopping, pickMonitoring, autoQueueActive, systemBrowserLogin, inputEnabled = true;
+    private bool resourcesDisposed;
+    private string themeName = "dark";
     private Panel? statusLed;
     private static readonly Uri AgentCatalogUri = new("https://valorant-api.com/v1/agents?isPlayableCharacter=true&language=ja-JP");
     private static string AgentCachePath => Path.Combine(Storage.Folder, "agents.json");
@@ -84,15 +98,18 @@ public sealed class MainWindow : DarkForm
     private readonly ThemedButton mapSettings = new() { Text = "マップ別エージェント設定", Compact = true, Dock = DockStyle.Fill };
     private readonly string? smokePath;
     private readonly string? previewAgentId;
+    private readonly Func<bool> valorantRunning;
 
-    public MainWindow(string? smokePath = null, bool loginSmokeTest = false, string? previewAgentId = null, bool pickerSmokeTest = false, bool mapSmokeTest = false)
-        : base(resizable: true)
+    public MainWindow(string? smokePath = null, bool loginSmokeTest = false, string? previewAgentId = null, bool pickerSmokeTest = false, bool mapSmokeTest = false, bool skipBackgroundWork = false, Func<bool>? valorantRunning = null)
+        : base(resizable: false)
     {
         this.smokePath = smokePath;
         this.previewAgentId = previewAgentId;
-        Text = Edition.IsTrial ? "SpikeSide 体験版" : "SpikeSide";
+        this.valorantRunning = valorantRunning ?? RiotApi.IsValorantRunning;
+        Text = Edition.DisplayName;
         ClientSize = new Size(1600, 860); MinimumSize = new Size(1200, 760); StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Theme.Background; ForeColor = Theme.Text; Font = new Font("Yu Gothic UI", 10.5f);
+        BackColor = Theme.Background; ForeColor = Theme.Text; Font = SharedFonts.Get("Yu Gothic UI", 10.5f);
+        tray.Icon = trayIcon;
 
         using (var resource = Assembly.GetExecutingAssembly().GetManifestResourceStream("ValoAutoPick.agents.json"))
         {
@@ -110,6 +127,7 @@ public sealed class MainWindow : DarkForm
         mapAgents = new(config.MapAgents, StringComparer.OrdinalIgnoreCase);
         if (Edition.IsTrial) mapAgents.Clear();
         systemBrowserLogin = config.SystemBrowserLogin;
+        themeName = config.Theme;
         if (previewAgentId != null) mainAgent = agents.FirstOrDefault(a => a.Id.Equals(previewAgentId, StringComparison.OrdinalIgnoreCase));
         autoStart.Checked = config.StartOnLaunch;
         region.SelectedIndex = Math.Max(0, Array.IndexOf(RegionValues, config.Region));
@@ -119,18 +137,14 @@ public sealed class MainWindow : DarkForm
         var dashboard = BuildDashboard(); dashboard.Dock = DockStyle.Fill; dashboard.TabIndex = 1;
         dashboardPage = dashboard;
         pageHost.Controls.Add(dashboard);
-        matchHistory = new MatchHistoryControl(api, agents) { Visible = false, Dock = DockStyle.Fill, TabIndex = 2 };
-        storePreview = new StorePreviewControl(api) { Visible = false, Dock = DockStyle.Fill, TabIndex = 3 };
-        pageHost.Controls.Add(matchHistory);
-        pageHost.Controls.Add(storePreview);
-        var version = new Label { Text = "v" + (Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? ""), ForeColor = Theme.Muted, BackColor = Theme.Background, Font = new Font("Segoe UI", 8.5f), TextAlign = ContentAlignment.MiddleRight, AutoSize = false, TabStop = false, AccessibleName = "バージョン" };
+        var version = new Label { Text = "v" + (Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? ""), ForeColor = Theme.Muted, BackColor = Theme.Background, Font = SharedFonts.Get("Segoe UI", 8.5f), TextAlign = ContentAlignment.MiddleRight, AutoSize = false, TabStop = false, AccessibleName = "バージョン" };
         root.Controls.Add(pageHost); root.Controls.Add(header); root.Controls.Add(version);
         if (Edition.IsTrial) root.Controls.Add(trialCorner);
         Controls.Add(root);
         void ArrangeRoot()
         {
-            var width = Math.Max(UiMetrics.Px(this, 850), root.ClientSize.Width - UiMetrics.Px(this, 39));
-            var height = Math.Max(UiMetrics.Px(this, Edition.IsTrial ? 760 : 640), root.ClientSize.Height - UiMetrics.Px(this, 87));
+            var width = Math.Max(UiMetrics.Px(this, 850), root.ClientSize.Width - UiMetrics.Px(this, UiMetrics.PageInset * 2));
+            var height = Math.Max(UiMetrics.Px(this, 640), root.ClientSize.Height - UiMetrics.Px(this, 87));
             var offset = root.AutoScrollPosition;
             header.Bounds = new Rectangle(offset.X + UiMetrics.Px(this, 20), offset.Y + UiMetrics.Px(this, 13), width, UiMetrics.Px(this, 49));
             pageHost.Bounds = new Rectangle(offset.X + UiMetrics.Px(this, 20), offset.Y + UiMetrics.Px(this, 68), width, height);
@@ -154,19 +168,31 @@ public sealed class MainWindow : DarkForm
         dashboardTab.Click += (_, _) => ShowMainPage(MainPage.Dashboard);
         matchHistoryButton.Click += (_, _) => ShowMainPage(MainPage.MatchHistory);
         storeTab.Click += (_, _) => ShowMainPage(MainPage.Store);
-        storePreview.LoginRequested += async (_, _) => await SignIn();
-        storePreview.LogoutRequested += async (_, _) => await SignOut();
+        appSettings.Click += (_, _) => ShowSettings();
+        shortcutTips.SetToolTip(dashboardTab, "ピック (Ctrl+1)");
+        shortcutTips.SetToolTip(matchHistoryButton, "試合分析 (Ctrl+2)");
+        shortcutTips.SetToolTip(storeTab, "STORE (Ctrl+3)");
         start.Click += async (_, _) => await TogglePickMonitoring();
         autoQueue.Click += async (_, _) => await ToggleAutoQueue();
         region.SelectedIndexChanged += async (_, _) => { SaveSettings(); if (api.HasAccountSession) { await SignOut(clearBrowserSession: false); await RestoreAccountSession(ReadSettings()); } };
         autoStart.CheckedChanged += (_, _) => SaveSettings();
-        Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) { Hide(); tray.ShowBalloonTip(1500, "SpikeSide", monitor != null ? autoQueueActive ? "自動インキューを監視中です" : "自動ピックを監視中です" : "監視は停止中です", ToolTipIcon.Info); } };
+        Resize += (_, _) => { if (WindowState != FormWindowState.Minimized) restoreState = WindowState; };
+        Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) { Hide(); tray.ShowBalloonTip(1500, Text, monitor != null ? autoQueueActive ? pickMonitoring ? "自動ピック・インキューを監視中です" : "自動インキューを監視中です" : "自動ピックを監視中です" : "監視は停止中です", ToolTipIcon.Info); } };
+        VisibleChanged += (_, _) => { if (Visible && monitor != null && System.Windows.SystemParameters.ClientAreaAnimation) ledPulseTimer.Start(); };
         tray.DoubleClick += (_, _) => Restore();
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("開く", null, (_, _) => Restore());
-        menu.Items.Add("監視を停止", null, async (_, _) => await StopMonitor());
-        menu.Items.Add("終了", null, (_, _) => Close());
-        tray.ContextMenuStrip = menu;
+        var trayHeader = new TrayHeaderItem(Edition.IsTrial);
+        trayStatus = new TrayStatusItem(
+            "停止処理中", "監視は停止中", "自動ピック・インキューを監視中", "自動インキューを監視中", "自動ピックを監視中",
+            "Riotにログインしてください", "VALORANTが起動していません", "VALORANTが終了したため停止しました", "エージェントを選んでください", "設定エージェントは未解放です", "所有情報を確認してください");
+        trayPickToggle = new TrayToggleItem("自動ピック監視", async (_, _) => await TogglePickMonitoringFromTray());
+        trayQueueToggle = new TrayToggleItem("自動インキュー", async (_, _) => await ToggleAutoQueueFromTray()) { Visible = !Edition.IsTrial };
+        var trayOpen = new TrayActionItem("ウィンドウを開く", (_, _) => Restore());
+        var trayExit = new TrayActionItem($"{Edition.DisplayName} を終了", (_, _) => Close(), destructive: true);
+        trayMenu.Items.AddRange([trayHeader, trayStatus, new TraySeparator(), trayPickToggle, trayQueueToggle, new TraySeparator(), trayOpen, new TraySeparator(), trayExit, new TraySeparator(line: false, height: 4)]);
+        trayMenu.Opening += (_, _) => SyncTrayMenu();
+        trayMenu.Closed += (_, _) => trayWarningText = "";
+        tray.ContextMenuStrip = trayMenu;
+        SyncTrayMenu();
         UpdateConnectionUi();
         Load += (_, _) => { ActiveControl = login.Visible ? login : region; root.AutoScrollPosition = Point.Empty; };
 
@@ -174,6 +200,26 @@ public sealed class MainWindow : DarkForm
         {
             if (smokePath != null)
             {
+                if (Environment.GetCommandLineArgs().Contains("--preview-tray"))
+                {
+                    trayMenu.Show(PointToScreen(new Point(UiMetrics.Px(this, 30), UiMetrics.Px(this, 80))));
+                    await Task.Delay(700);
+                    using var shot = new Bitmap(trayMenu.Width, trayMenu.Height);
+                    using (var graphics = Graphics.FromImage(shot)) graphics.CopyFromScreen(trayMenu.Location, Point.Empty, trayMenu.Size);
+                    shot.Save(smokePath); trayMenu.Close(); Close(); return;
+                }
+                if (Environment.GetCommandLineArgs().Contains("--preview-settings"))
+                {
+                    using var dialog = new SettingsDialog(Theme.IsLight ? "light" : "dark", _ => true);
+                    dialog.Shown += async (_, _) =>
+                    {
+                        await Task.Delay(700); dialog.TopMost = true; dialog.Activate();
+                        using var shot = new Bitmap(dialog.Width, dialog.Height);
+                        using (var graphics = Graphics.FromImage(shot)) graphics.CopyFromScreen(dialog.Location, Point.Empty, dialog.Size);
+                        shot.Save(smokePath); dialog.Close();
+                    };
+                    dialog.ShowDialog(this); Close(); return;
+                }
                 if (loginSmokeTest)
                 {
                     try
@@ -231,6 +277,13 @@ public sealed class MainWindow : DarkForm
                     await matchHistory!.ActivatePageAsync();
                     if (Environment.GetCommandLineArgs().Contains("--preview-career-tab"))
                         matchHistory!.ShowCareerForPreview();
+                    if (Environment.GetCommandLineArgs().Contains("--preview-history-next"))
+                    {
+                        await Task.Delay(700);
+                        matchHistory!.ShowNextHistoryPageForPreview();
+                        if (Environment.GetCommandLineArgs().Contains("--preview-history-last"))
+                            for (var i = 0; i < 20; i++) matchHistory.ShowNextHistoryPageForPreview();
+                    }
                 }
                 else if (Environment.GetCommandLineArgs().Contains("--preview-store"))
                 {
@@ -250,7 +303,7 @@ public sealed class MainWindow : DarkForm
                 using (var graphics = Graphics.FromImage(bitmap)) graphics.CopyFromScreen(Location, Point.Empty, Size);
                 bitmap.Save(smokePath); Close();
             }
-            else
+            else if (!skipBackgroundWork)
             {
                 // Runs in the background; login restoration never waits for the catalogue.
                 StartAgentCatalogRefresh();
@@ -260,38 +313,71 @@ public sealed class MainWindow : DarkForm
         };
         FormClosing += async (_, e) =>
         {
+            if (allowClose) return;
+            e.Cancel = true;
             if (closing) return;
-            e.Cancel = true; closing = true; lifetime.Cancel(); await StopMonitor();
-            if (accountRefresh != null) { try { await accountRefresh; } catch (OperationCanceledException) { } }
-            if (agentCatalogRefresh != null) { try { await agentCatalogRefresh; } catch (Exception) { } }
-            matchHistory?.Dispose(); storePreview?.Dispose(); loginWindow?.Dispose(); api.Dispose(); tray.Dispose(); BeginInvoke(Close);
+            closing = true; trayExit.Enabled = false; lifetime.Cancel();
+            try
+            {
+                await StopMonitor();
+                foreach (var task in new Task?[] { signInTask, accountRefresh, ownedLoad, agentCatalogRefresh })
+                    if (task != null) try { await task; } catch (Exception) { }
+                if (matchHistory != null) await matchHistory.ShutdownAsync();
+            }
+            catch (Exception ex) { NativePageStyle.LogPageError("Shutdown", ex); }
+            finally
+            {
+                ReleaseResources();
+                allowClose = true;
+                if (!IsDisposed && IsHandleCreated) BeginInvoke(Close);
+            }
         };
+    }
+
+    private readonly System.Windows.Forms.Timer ledPulseTimer = new() { Interval = 60 };
+
+    private void ReleaseResources()
+    {
+        if (resourcesDisposed) return;
+        resourcesDisposed = true;
+        lifetime.Cancel();
+        matchHistory?.Dispose(); storePreview?.Dispose(); loginWindow?.Dispose(); api.Dispose();
+        tray.ContextMenuStrip = null; trayMenu.Dispose(); tray.Dispose(); trayIcon.Dispose(); shortcutTips.Dispose();
+        ledPulseTimer.Stop(); ledPulseTimer.Dispose(); lifetime.Dispose();
+        foreach (var control in new Control[] { autoQueue, mapSettings, trialRemaining, trialDescription, trialCorner })
+            if (control.Parent is null && !control.IsDisposed) control.Dispose();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) { closing = true; ReleaseResources(); }
+        base.Dispose(disposing);
     }
 
     private Control BuildHeader()
     {
+        // The window caption already shows the app icon and name (and the edition), so the header only
+        // carries page navigation on the left and the account actions on the right.
         var header = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Background, Margin = Padding.Empty };
-        var brand = new Panel { Dock = DockStyle.Left, Width = UiMetrics.Px(this, 315), BackColor = Theme.Background };
-        brand.Paint += (_, e) =>
-        {
-            var size = UiMetrics.Px(brand, 40);
-            AppIcon.Draw(e.Graphics, new Rectangle(0, UiMetrics.Px(brand, 1), size, size));
-        };
-        brand.Controls.Add(new Label { Text = Edition.IsTrial ? "SpikeSide 体験版" : "SpikeSide", ForeColor = Theme.Text, Font = new Font("Segoe UI", 18, FontStyle.Bold), AutoSize = true, Location = new Point(49, 2) });
-        var loginBar = new FlowLayoutPanel { Anchor = AnchorStyles.Top | AnchorStyles.Right, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(0, 4, 0, 0), Margin = Padding.Empty };
+        var navigation = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(0, UiMetrics.Px(this, UiMetrics.TightGap), 0, 0), Margin = Padding.Empty, AccessibleRole = AccessibleRole.PageTabList, AccessibleName = "ページ" };
+        var loginBar = new FlowLayoutPanel { FlowDirection = FlowDirection.LeftToRight, WrapContents = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(0, UiMetrics.Px(this, UiMetrics.TightGap), 0, 0), Margin = Padding.Empty };
         dashboardTab.Margin = Padding.Empty;
-        matchHistoryButton.Margin = new Padding(6, 0, 0, 0);
-        storeTab.Margin = new Padding(6, 0, 8, 0);
-        logout.Margin = new Padding(7, 0, 0, 0); login.Margin = Padding.Empty;
-        loginBar.Controls.Add(dashboardTab); loginBar.Controls.Add(matchHistoryButton); loginBar.Controls.Add(storeTab);
-        loginBar.Controls.Add(login); loginBar.Controls.Add(logout);
+        matchHistoryButton.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
+        storeTab.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
+        logout.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0); login.Margin = Padding.Empty;
+        navigation.Controls.Add(dashboardTab); navigation.Controls.Add(matchHistoryButton); navigation.Controls.Add(storeTab);
+        appSettings.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
+        loginBar.Controls.Add(login); loginBar.Controls.Add(logout); loginBar.Controls.Add(appSettings);
         void PlaceActions()
         {
-            loginBar.Location = new Point(Math.Max(0, header.ClientSize.Width - loginBar.Width), Math.Max(0, (header.ClientSize.Height - loginBar.Height) / 2));
+            navigation.Location = new Point(0, Math.Max(0, (header.ClientSize.Height - navigation.Height) / 2));
+            loginBar.Location = new Point(Math.Max(navigation.Right + UiMetrics.Px(header, UiMetrics.CardInset), header.ClientSize.Width - loginBar.Width),
+                Math.Max(0, (header.ClientSize.Height - loginBar.Height) / 2));
         }
+        header.Controls.Add(navigation);
         header.Controls.Add(loginBar);
-        header.Controls.Add(brand);
         header.Resize += (_, _) => PlaceActions();
+        navigation.SizeChanged += (_, _) => PlaceActions();
         loginBar.SizeChanged += (_, _) => PlaceActions();
         PlaceActions();
         return header;
@@ -299,25 +385,27 @@ public sealed class MainWindow : DarkForm
 
     private Control BuildDashboard()
     {
-        var columns = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Background, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty, Padding = new Padding(0, 6, 0, 6) };
+        var columns = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Background, ColumnCount = 2, RowCount = 2, Margin = Padding.Empty, Padding = new Padding(0, UiMetrics.Px(this, UiMetrics.ControlGap), 0, UiMetrics.Px(this, UiMetrics.ControlGap)) };
         columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58)); columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
         columns.RowStyles.Add(new RowStyle(SizeType.Percent, 50)); columns.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        matchMap.Margin = new Padding(0, 0, 16, 7);
-        hero.Dock = DockStyle.Fill; hero.Margin = new Padding(0, 7, 16, 0);
-        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Background, ColumnCount = 1, RowCount = 2, Margin = new Padding(0, 0, 0, 7) };
+        matchMap.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.CardInset), UiMetrics.Px(this, UiMetrics.ControlGap));
+        hero.Dock = DockStyle.Fill; hero.Margin = new Padding(0, UiMetrics.Px(this, UiMetrics.ControlGap), UiMetrics.Px(this, UiMetrics.CardInset), 0);
+        var sidebar = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Background, ColumnCount = 1, RowCount = 2, Margin = new Padding(0, 0, 0, UiMetrics.Px(this, UiMetrics.ControlGap)) };
         sidebar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 57)); sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 43));
-        settingsPanel.Margin = new Padding(0, 0, 0, 12); mapSettingsCard.Margin = Padding.Empty; startPanel.Margin = new Padding(0, 7, 0, 0);
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+        settingsPanel.Margin = new Padding(0, 0, 0, UiMetrics.Px(this, UiMetrics.ControlGap)); mapSettingsCard.Margin = Padding.Empty;
+        startPanel.Margin = new Padding(0, UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0);
         sidebar.Controls.Add(settingsPanel, 0, 0); sidebar.Controls.Add(mapSettingsCard, 0, 1);
         columns.Controls.Add(matchMap, 0, 0); columns.Controls.Add(hero, 0, 1);
         columns.Controls.Add(sidebar, 1, 0); columns.Controls.Add(startPanel, 1, 1);
 
         var connection = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Padding = new Padding(9, 4, 9, 4), RowCount = 4, ColumnCount = 1, Margin = Padding.Empty };
         connection.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        connection.RowStyles.Add(new RowStyle(SizeType.Absolute, 32)); connection.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        connection.RowStyles.Add(new RowStyle(SizeType.Absolute, 52)); connection.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        connection.RowStyles.Add(new RowStyle(SizeType.Absolute, 28)); connection.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+        connection.RowStyles.Add(new RowStyle(SizeType.Absolute, 44)); connection.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         connection.Controls.Add(SectionTitle("接続設定"), 0, 0);
-        accountInfo.Font = new Font("Yu Gothic UI", 9.5f, FontStyle.Bold); connection.Controls.Add(accountInfo, 0, 1);
+        accountInfo.Font = SharedFonts.Get("Yu Gothic UI", 9.5f, FontStyle.Bold); connection.Controls.Add(accountInfo, 0, 1);
         var regionRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
         regionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 94)); regionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         regionRow.Controls.Add(FieldLabel("接続地域"), 0, 0); region.Dock = DockStyle.Fill; region.Margin = Padding.Empty; regionRow.Controls.Add(region, 1, 0);
@@ -327,7 +415,7 @@ public sealed class MainWindow : DarkForm
 
         var maps = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Padding = new Padding(9, 5, 9, 6), ColumnCount = 1, RowCount = 3, Margin = Padding.Empty };
         maps.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        maps.RowStyles.Add(new RowStyle(SizeType.Absolute, 32)); maps.RowStyles.Add(new RowStyle(SizeType.Absolute, 30)); maps.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        maps.RowStyles.Add(new RowStyle(SizeType.Absolute, 26)); maps.RowStyles.Add(new RowStyle(SizeType.Absolute, 24)); maps.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         if (Edition.IsTrial)
         {
             maps.Controls.Add(SectionTitle("体験版"), 0, 0);
@@ -337,7 +425,7 @@ public sealed class MainWindow : DarkForm
         else
         {
             maps.Controls.Add(SectionTitle("マップ別設定"), 0, 0);
-            mapSummary.Font = new Font("Yu Gothic UI", 9.5f); mapSummary.Margin = Padding.Empty; maps.Controls.Add(mapSummary, 0, 1);
+            mapSummary.Font = SharedFonts.Get("Yu Gothic UI", 9.5f); mapSummary.Margin = Padding.Empty; maps.Controls.Add(mapSummary, 0, 1);
             mapSettings.Margin = new Padding(0, 4, 0, 1); maps.Controls.Add(mapSettings, 0, 2);
         }
         mapSettingsCard.Controls.Add(maps);
@@ -356,20 +444,45 @@ public sealed class MainWindow : DarkForm
         statusRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 22)); statusRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         statusRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var led = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty }; statusLed = led;
+        typeof(Panel).GetProperty("DoubleBuffered", BindingFlags.Instance | BindingFlags.NonPublic)?.SetValue(led, true);
+        ledPulseTimer.Tick += (_, _) =>
+        {
+            if (monitor == null || !Visible || WindowState == FormWindowState.Minimized || !System.Windows.SystemParameters.ClientAreaAnimation)
+            {
+                ledPulseTimer.Stop();
+                led.Invalidate();
+                return;
+            }
+            led.Invalidate();
+        };
         led.Paint += (_, e) =>
         {
-            var color = monitor == null ? Theme.Muted : Theme.Green; var diameter = UiMetrics.Px(led, 10);
-            using var brush = new SolidBrush(color); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias; e.Graphics.FillEllipse(brush, UiMetrics.Px(led, 2), (led.Height - diameter) / 2, diameter, diameter);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            var active = monitor != null;
+            var color = active ? Theme.Green : Theme.Muted;
+            var diameter = UiMetrics.Px(led, 9);
+            var cx = UiMetrics.Px(led, 3) + diameter / 2f;
+            var cy = led.Height / 2f;
+            if (active && System.Windows.SystemParameters.ClientAreaAnimation)
+            {
+                var wave = (float)(0.5 + 0.5 * Math.Sin(Environment.TickCount64 / 320.0));
+                var haloDiameter = diameter + UiMetrics.Px(led, 5) * wave;
+                var alpha = (int)Math.Round(35 + 55 * (1f - wave));
+                using var halo = new SolidBrush(Color.FromArgb(alpha, Theme.Green));
+                e.Graphics.FillEllipse(halo, cx - haloDiameter / 2f, cy - haloDiameter / 2f, haloDiameter, haloDiameter);
+            }
+            using var brush = new SolidBrush(color);
+            e.Graphics.FillEllipse(brush, cx - diameter / 2f, cy - diameter / 2f, diameter, diameter);
         };
-        status.Font = new Font("Yu Gothic UI", 10.5f, FontStyle.Bold); status.Margin = Padding.Empty;
-        detail.Font = new Font("Yu Gothic UI", 10); detail.Margin = Padding.Empty;
-        queueDetail.Font = new Font("Yu Gothic UI", 9); queueDetail.Margin = Padding.Empty;
+        status.Font = SharedFonts.Get("Yu Gothic UI", 10.5f, FontStyle.Bold); status.Margin = Padding.Empty;
+        detail.Font = SharedFonts.Get("Yu Gothic UI", 10); detail.Margin = Padding.Empty;
+        queueDetail.Font = SharedFonts.Get("Yu Gothic UI", 9); queueDetail.Margin = Padding.Empty;
         statusRow.Controls.Add(led, 0, 0); statusRow.Controls.Add(status, 1, 0);
         action.Controls.Add(statusRow, 0, 4); action.Controls.Add(detail, 0, 5); if (!Edition.IsTrial) action.Controls.Add(queueDetail, 0, 6);
         startPanel.Controls.Add(action); return columns;
     }
 
-    private static Label SectionTitle(string text) => new() { Text = text, ForeColor = Theme.Text, Font = new Font("Yu Gothic UI", 12.5f, FontStyle.Bold), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
+    private static Label SectionTitle(string text) => new() { Text = text, ForeColor = Theme.Text, Font = SharedFonts.Get("Yu Gothic UI", 12.5f, FontStyle.Bold), Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
 
     private void RestoreAgent(Settings config)
     {
@@ -459,7 +572,7 @@ public sealed class MainWindow : DarkForm
         if (!api.HasAccountSession || ownedAgents == null || ownedSubject != api.Subject) { Report("エージェントの所有情報を確認してください"); return; }
         using var dialog = new MapSettingsDialog(agents, mapAgents, ownedAgents);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        mapAgents = dialog.MapAgents; UpdateMapSummary(); UpdateMap(displayedMap); SaveSettings();
+        mapAgents = dialog.MapAgents; UpdateMapSummary(); UpdateMap(displayedMap); SaveSettings(); UpdateConnectionUi();
     }
 
     private Settings ReadSettings() => new Settings
@@ -468,8 +581,25 @@ public sealed class MainWindow : DarkForm
         MapAgents = new(mapAgents, StringComparer.OrdinalIgnoreCase),
         StartOnLaunch = autoStart.Checked,
         Region = RegionValues[Math.Clamp(region.SelectedIndex, 0, RegionValues.Length - 1)],
-        SystemBrowserLogin = systemBrowserLogin
+        SystemBrowserLogin = systemBrowserLogin,
+        Theme = themeName
     }.Normalize();
+
+    private void ShowSettings()
+    {
+        using var dialog = new SettingsDialog(themeName, SetTheme);
+        dialog.ShowDialog(this);
+    }
+
+    private bool SetTheme(string value)
+    {
+        if (themeName == value) return true;
+        var previous = themeName;
+        themeName = value;
+        if (!SaveSettings()) { themeName = previous; return false; }
+        Theme.Apply(Application.OpenForms.Cast<Control>().ToArray(), value);
+        return true;
+    }
 
     private bool SaveSettings()
     {
@@ -487,9 +617,11 @@ public sealed class MainWindow : DarkForm
 
     private void UpdateConnectionUi()
     {
+        if (closing || IsDisposed || Disposing) return;
         UpdateAgentAccessUi();
         ApplyAccountLabels(api.HasAccountSession, api.AccountName);
-        login.Primary = false;
+        // One accent-filled action at a time: sign in first, then (after an agent is set) start monitoring.
+        login.Primary = selectedPage == MainPage.Dashboard && !api.HasAccountSession && loginAttempt == null;
         login.Visible = true;
         login.Enabled = !closing && (loginAttempt != null || !busy && monitor == null && !api.HasAccountSession);
         dashboardTab.Enabled = !closing;
@@ -499,13 +631,39 @@ public sealed class MainWindow : DarkForm
         login.AccessibleName = api.HasAccountSession ? $"接続済み: {api.AccountName} / {api.RegionLabel}" : loginAttempt != null ? "ログインを中止" : "Riotアカウントにログイン";
         start.Text = stopping ? "停止中…" : pickMonitoring ? "監視を停止" : "監視を開始";
         start.Enabled = !busy && !closing && !stopping;
+        start.Primary = pickMonitoring || api.HasAccountSession && (mainAgent != null || mapAgents.Count > 0);
         autoQueue.Text = stopping ? "停止中…" : autoQueueActive ? "自動インキュー停止" : "自動インキュー開始";
         autoQueue.Primary = autoQueueActive;
-        autoQueue.Enabled = !busy && !closing && !stopping;
+        autoQueue.Enabled = !busy && !closing && !stopping && queueLeaveTask is not { IsCompleted: false };
         queueDetail.ForeColor = autoQueueActive ? Theme.Green : Theme.Muted;
         if (!autoQueueActive) SetQueueStatus("自動インキューは停止中");
         start.Invalidate();
         autoQueue.Invalidate();
+        SyncTrayMenu();
+    }
+
+    private void SyncTrayMenu()
+    {
+        if (closing || IsDisposed || Disposing || trayStatus == null || trayPickToggle == null || trayQueueToggle == null) return;
+        var canToggle = !busy && !closing && !stopping;
+        trayPickToggle.IsOn = pickMonitoring && !stopping;
+        trayPickToggle.Enabled = canToggle;
+        trayQueueToggle.IsOn = autoQueueActive && !stopping;
+        trayQueueToggle.Enabled = canToggle && !Edition.IsTrial && queueLeaveTask is not { IsCompleted: false };
+        if (trayWarningText.Length > 0 && monitor == null && !stopping)
+        {
+            trayStatus.Text = trayWarningText;
+            trayStatus.Active = false;
+            trayStatus.Warning = true;
+        }
+        else
+        {
+            trayStatus.Text = stopping ? "停止処理中" : monitor == null ? "監視は停止中" : pickMonitoring && autoQueueActive ? "自動ピック・インキューを監視中" : autoQueueActive ? "自動インキューを監視中" : "自動ピックを監視中";
+            trayStatus.Active = monitor != null && !stopping;
+            trayStatus.Warning = false;
+        }
+        TrayMenuRenderer.ApplyMetrics(trayMenu);
+        trayMenu.Invalidate();
     }
     private void UpdateAgentAccessUi()
     {
@@ -532,11 +690,12 @@ public sealed class MainWindow : DarkForm
     private void ShowMainPage(MainPage page)
     {
         if (closing || selectedPage == page) return;
+        using var redraw = PageRedrawScope.Begin(pageHost);
         selectedPage = page;
         var next = page switch
         {
-            MainPage.MatchHistory => (Control)matchHistory!,
-            MainPage.Store => storePreview!,
+            MainPage.MatchHistory => GetMatchHistory(),
+            MainPage.Store => GetStorePreview(),
             _ => dashboardPage!
         };
         pageHost.SuspendLayout();
@@ -547,18 +706,40 @@ public sealed class MainWindow : DarkForm
             foreach (Control control in pageHost.Controls)
                 if (control != next) control.Hide();
         }
-        finally { pageHost.ResumeLayout(); }
+        finally { pageHost.ResumeLayout(true); }
+        next.PerformLayout();
+        if (next is StorePreviewControl storePage) storePage.PreparePageLayout();
         Text = page switch
         {
             MainPage.MatchHistory => "試合分析",
             MainPage.Store => "STORE確認",
             _ => Edition.IsTrial ? "SpikeSide 体験版" : "SpikeSide"
         };
-        dashboardTab.Primary = page == MainPage.Dashboard;
-        matchHistoryButton.Primary = page == MainPage.MatchHistory;
-        storeTab.Primary = page == MainPage.Store;
+        dashboardTab.Selected = page == MainPage.Dashboard;
+        matchHistoryButton.Selected = page == MainPage.MatchHistory;
+        storeTab.Selected = page == MainPage.Store;
+        UpdateConnectionUi();
         if (page != MainPage.Dashboard)
             _ = ActivatePageSafelyAsync(page);
+    }
+
+    private MatchHistoryControl GetMatchHistory()
+    {
+        if (matchHistory != null) return matchHistory;
+        var page = new MatchHistoryControl(api, agents) { Visible = false, Dock = DockStyle.Fill, TabIndex = 2 };
+        page.LoginRequested += async (_, _) => await SignInFromPage();
+        pageHost.Controls.Add(page);
+        return matchHistory = page;
+    }
+
+    private StorePreviewControl GetStorePreview()
+    {
+        if (storePreview != null) return storePreview;
+        var page = new StorePreviewControl(api) { Visible = false, Dock = DockStyle.Fill, TabIndex = 3 };
+        page.LoginRequested += async (_, _) => await SignInFromPage();
+        page.LogoutRequested += async (_, _) => await SignOut();
+        pageHost.Controls.Add(page);
+        return storePreview = page;
     }
 
     private async Task ActivatePageSafelyAsync(MainPage page)
@@ -619,10 +800,24 @@ public sealed class MainWindow : DarkForm
         finally { ownedLoad = null; }
     }
 
-    private async Task SignIn()
+    // Login buttons inside the embedded pages only ever start a login. Unlike the header button they never
+    // cancel one in progress (their label does not change to "中止"), and they do nothing once connected.
+    private Task SignInFromPage()
     {
-        if (loginAttempt != null) { loginAttempt.Cancel(); return; }
-        if (busy) return;
+        if (closing || busy || loginAttempt != null || api.HasAccountSession) return Task.CompletedTask;
+        return SignIn();
+    }
+
+    private Task SignIn()
+    {
+        if (loginAttempt != null) { loginAttempt.Cancel(); return Task.CompletedTask; }
+        if (busy || closing || IsDisposed) return Task.CompletedTask;
+        signInTask = SignInCore();
+        return signInTask;
+    }
+
+    private async Task SignInCore()
+    {
         using var attempt = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         loginAttempt = attempt;
         busy = true; SetInputEnabled(false); UpdateConnectionUi();
@@ -633,7 +828,7 @@ public sealed class MainWindow : DarkForm
             api.Logout(); ownedAgents = null; ownedSubject = ""; engine = null; engineSubject = "";
             Report("ブラウザーでRiotにログインしてください");
             await using var browser = new PersistentBrowser();
-            var result = await new SystemBrowserAuth(AuthFlow.NewState()).Run((url, _) => browser.Open(url, false), attempt.Token);
+            var result = await new SystemBrowserAuth(AuthFlow.NewState()).Run((url, _) => browser.Open(url, false, attempt.Token), attempt.Token);
             if (result == null) { Report("ログインできませんでした · 再度お試しください"); return; }
             await api.Login(result, ReadSettings().Region, attempt.Token);
             systemBrowserLogin = true;
@@ -645,7 +840,8 @@ public sealed class MainWindow : DarkForm
         { if (!closing) Report(attempt.IsCancellationRequested ? "ログインを中止しました" : "ログインがタイムアウトしました"); }
         catch (SocketException) { Report("ブラウザーログイン用のポート80を使用できません"); }
         catch (Exception e) { Report(LoginError(e)); }
-        finally { loginAttempt = null; busy = false; SetInputEnabled(true); UpdateConnectionUi(); }
+        finally { loginAttempt = null; busy = false; if (!closing && !IsDisposed) { SetInputEnabled(true); UpdateConnectionUi(); } }
+        if (closing || IsDisposed) return;
         if (api.HasAccountSession) await NotifyEmbeddedPagesAsync();
         if (api.HasAccountSession && autoStart.Checked) { pickMonitoring = true; StartMonitor(); }
     }
@@ -679,11 +875,12 @@ public sealed class MainWindow : DarkForm
                     await LoadOwnedAgents(lifetime.Token);
                 if (!systemBrowserLogin || busy || closing ||
                     api.HasAccountSession && DateTimeOffset.UtcNow < api.ExpiresAt.AddMinutes(-5)) continue;
+                var wasConnected = api.HasAccountSession;
                 if (await RefreshAccountSession(lifetime.Token))
                 {
                     UpdateConnectionUi();
                     if (monitor == null) Report(ownedAgents == null ? "接続済み · エージェントの所有情報を取得できません" : "アカウントを接続しました");
-                    if (autoStart.Checked && monitor == null) { pickMonitoring = true; StartMonitor(); }
+                    if (!wasConnected && autoStart.Checked && monitor == null) { pickMonitoring = true; StartMonitor(); }
                 }
             }
         }
@@ -713,7 +910,7 @@ public sealed class MainWindow : DarkForm
             }
             await using var browser = new PersistentBrowser();
             var result = await new SystemBrowserAuth(AuthFlow.NewState(), silent: true)
-                .Run((url, _) => browser.Open(url, true), ct);
+                .Run((url, _) => browser.Open(url, true, ct), ct);
             if (result == null) return false;
             await api.Login(result, settings.Region, ct, api.HasAccountSession ? api.Subject : null);
             if (ownedSubject != api.Subject) { ownedAgents = null; ownedSubject = ""; }
@@ -723,14 +920,14 @@ public sealed class MainWindow : DarkForm
         }
         catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { return false; }
         catch (Exception e) when (e is SocketException or BrowserIsolationException or IOException or UnauthorizedAccessException or
-            System.ComponentModel.Win32Exception or HttpRequestException or ApiException or ClientUnavailableException or InvalidOperationException or JsonException or InvalidDataException)
+            System.ComponentModel.Win32Exception or HttpRequestException or ApiException or ClientUnavailableException or InvalidOperationException or JsonException or InvalidDataException or AggregateException)
         { return false; }
     }
 
     private async Task SignOut(bool clearBrowserSession = true)
     {
         if (busy) return;
-        busy = true;
+        busy = true; trayWarningText = ""; SetInputEnabled(false); UpdateConnectionUi();
         try
         {
             matchHistory?.ResetSession();
@@ -749,7 +946,7 @@ public sealed class MainWindow : DarkForm
             }
         }
         catch { Report("ログイン情報を消去できませんでした · アプリを終了してください"); }
-        finally { busy = false; UpdateConnectionUi(); }
+        finally { busy = false; if (!closing && !IsDisposed) { SetInputEnabled(true); UpdateConnectionUi(); } }
     }
 
     private void SetInputEnabled(bool enabled)
@@ -761,29 +958,81 @@ public sealed class MainWindow : DarkForm
         login.Enabled = enabled && !api.HasAccountSession;
         logout.Enabled = enabled && api.HasAccountSession;
         start.Enabled = !busy && !closing && !stopping;
-        autoQueue.Enabled = !busy && !closing && !stopping;
+        autoQueue.Enabled = !busy && !closing && !stopping && queueLeaveTask is not { IsCompleted: false };
     }
 
     private async Task TogglePickMonitoring()
     {
+        trayWarningText = "";
         if (pickMonitoring)
         {
             pickMonitoring = false;
-            await StopMonitor();
+            if (!autoQueueActive) await StopMonitor();
+            else
+            {
+                UpdateConnectionUi();
+                Report("自動ピック監視を停止しました");
+            }
             return;
         }
-        if (!api.HasAccountSession) { Report("Riotアカウントにログインしてください"); return; }
-        if (ownedAgents == null || ownedSubject != api.Subject) { Report("エージェントの所有情報を確認してください"); return; }
-        if (mainAgent == null && mapAgents.Count == 0) { Report("エージェントを選んでください"); return; }
+        if (!ValidatePickMonitoring(ReadSettings())) { UpdateConnectionUi(); return; }
         pickMonitoring = true;
         if (monitor == null) StartMonitor();
         if (monitor == null) pickMonitoring = false;
         UpdateConnectionUi();
     }
 
+    private async Task TogglePickMonitoringFromTray()
+    {
+        var wasMonitoring = pickMonitoring;
+        await TogglePickMonitoring();
+        if (!wasMonitoring && !pickMonitoring)
+        {
+            trayWarningText = ResolveTrayWarning();
+            SyncTrayMenu();
+        }
+    }
+
+    private async Task ToggleAutoQueueFromTray()
+    {
+        var wasActive = autoQueueActive;
+        trayWarningText = "";
+        await ToggleAutoQueue();
+        if (!wasActive && !autoQueueActive)
+        {
+            trayWarningText = ResolveTrayWarning();
+            SyncTrayMenu();
+        }
+    }
+
+    private string ResolveTrayWarning()
+    {
+        if (!api.HasAccountSession) return "Riotにログインしてください";
+        if (!valorantRunning()) return "VALORANTが起動していません";
+        if (ownedAgents == null || ownedSubject != api.Subject) return "所有情報を確認してください";
+        if (mainAgent == null && mapAgents.Count == 0) return "エージェントを選んでください";
+        var settings = ReadSettings();
+        if (settings.AgentId.Length > 0 && !ownedAgents.Contains(settings.AgentId)) return "設定エージェントは未解放です";
+        return "監視を開始できません";
+    }
+
+    private bool ValidatePickMonitoring(Settings settings)
+    {
+        if (!api.HasAccountSession) { Report("Riotアカウントにログインしてください"); return false; }
+        if (ownedAgents == null || ownedSubject != api.Subject) { Report("エージェントの所有情報を確認してください"); return false; }
+        if (mainAgent == null && mapAgents.Count == 0) { Report("エージェントを選んでください"); return false; }
+        if (settings.AgentId.Length > 0 && !ownedAgents.Contains(settings.AgentId))
+        {
+            Report("設定したエージェントは未解放です · 別のエージェントを選んでください");
+            return false;
+        }
+        return true;
+    }
+
     private async Task ToggleAutoQueue()
     {
         if (Edition.IsTrial) return;
+        trayWarningText = "";
         if (autoQueueActive)
         {
             var activeQueue = queueEngine;
@@ -793,7 +1042,10 @@ public sealed class MainWindow : DarkForm
             {
                 UpdateConnectionUi();
                 SetQueueStatus("キュー検索をキャンセル中");
-                await CancelQueueSearch(activeQueue);
+                var leaving = CancelQueueSearch(activeQueue);
+                UpdateConnectionUi();
+                await leaving;
+                UpdateConnectionUi();
                 Report("自動インキューを停止しました");
             }
             return;
@@ -808,8 +1060,15 @@ public sealed class MainWindow : DarkForm
 
     private void StartMonitor()
     {
-        if (busy || stopping || monitor != null || !pickMonitoring && !autoQueueActive) return;
-        if (!RiotApi.IsValorantRunning())
+        trayWarningText = "";
+        if (monitor != null || !pickMonitoring && !autoQueueActive) return;
+        if (busy || stopping || closing)
+        {
+            pickMonitoring = autoQueueActive = false;
+            UpdateConnectionUi();
+            return;
+        }
+        if (!valorantRunning())
         {
             pickMonitoring = false;
             autoQueueActive = false;
@@ -818,15 +1077,14 @@ public sealed class MainWindow : DarkForm
             return;
         }
         var settings = ReadSettings();
-        if (pickMonitoring && string.IsNullOrEmpty(settings.AgentId) && settings.MapAgents.Count == 0) { Report("エージェントを選んでください"); return; }
-        if (!api.HasAccountSession) { Report("Riotアカウントにログインしてください"); return; }
-        if (pickMonitoring && (ownedAgents == null || ownedSubject != api.Subject)) { pickMonitoring = false; Report("エージェントの所有情報を確認してください"); UpdateConnectionUi(); return; }
-        if (pickMonitoring && settings.AgentId.Length > 0 && !ownedAgents!.Contains(settings.AgentId)) { pickMonitoring = false; Report("設定したエージェントは未所有です · 別のエージェントを選んでください"); UpdateConnectionUi(); return; }
-        if (!SaveSettings()) return;
+        if (!api.HasAccountSession) { pickMonitoring = autoQueueActive = false; Report("Riotアカウントにログインしてください"); UpdateConnectionUi(); return; }
+        if (pickMonitoring && !ValidatePickMonitoring(settings)) { pickMonitoring = autoQueueActive = false; UpdateConnectionUi(); return; }
+        if (!SaveSettings()) { pickMonitoring = autoQueueActive = false; UpdateConnectionUi(); return; }
         monitor = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         queueEngine = new AutoQueueEngine(api, SetQueueStatus);
         SetInputEnabled(false);
         status.Text = "監視中"; status.ForeColor = Theme.Green;
+        if (System.Windows.SystemParameters.ClientAreaAnimation) ledPulseTimer.Start();
         statusLed?.Invalidate();
         monitorTask = RunMonitor(settings, monitor.Token);
         UpdateConnectionUi();
@@ -841,6 +1099,25 @@ public sealed class MainWindow : DarkForm
         Task? notifications = null;
         Task? relayNotifications = null;
         Task? notificationChecks = null;
+        bool GameStillRunning()
+        {
+            if (valorantRunning()) return true;
+            pickMonitoring = false; autoQueueActive = false;
+            trayWarningText = "VALORANTが終了したため停止しました";
+            Report("VALORANTが終了したため監視を停止しました");
+            return false;
+        }
+        async Task<bool> WaitWhileGameRunning(TimeSpan duration)
+        {
+            var until = DateTimeOffset.UtcNow + duration;
+            do
+            {
+                if (!GameStillRunning()) return false;
+                var remaining = until - DateTimeOffset.UtcNow;
+                if (remaining <= TimeSpan.Zero) return true;
+                await Task.Delay(remaining < TimeSpan.FromSeconds(1) ? remaining : TimeSpan.FromSeconds(1), ct);
+            } while (true);
+        }
         var retryAfter = DateTimeOffset.MinValue;
         var queueRetryAfter = DateTimeOffset.MinValue;
         var nextQueuePulse = DateTimeOffset.MinValue;
@@ -888,8 +1165,8 @@ public sealed class MainWindow : DarkForm
                 var stateChanged = queueStateChanged;
                 queueStateChanged = false;
                 await WaitForQueueRetry(notificationsStop.Token);
-                if (!autoQueueActive || queueEngine == null) continue;
-                try { await queueEngine.Tick(DateTimeOffset.UtcNow, notificationsStop.Token, stateChanged: stateChanged, enabled: () => autoQueueActive); }
+                if (!autoQueueActive || queueEngine == null || !valorantRunning()) continue;
+                try { await queueEngine.Tick(DateTimeOffset.UtcNow, notificationsStop.Token, stateChanged: stateChanged, enabled: () => autoQueueActive && valorantRunning()); }
                 catch (ClientUnavailableException e) { SetQueueStatus(e.Message); QueueBackoff(ClientUnavailableIntervalMilliseconds); }
                 catch (ApiException e)
                 {
@@ -919,11 +1196,12 @@ public sealed class MainWindow : DarkForm
                 try
                 {
                     await WaitForRetry(ct);
+                    if (!GameStillRunning()) break;
                     if (DateTimeOffset.UtcNow >= api.ExpiresAt.AddMinutes(-3))
                     {
                         Report("ログインを更新中");
                         if (!await RefreshAccountSession(ct))
-                        { Report("ログインを再接続中"); await Task.Delay(TimeSpan.FromSeconds(30), ct); continue; }
+                        { Report("ログインを再接続中"); if (!await WaitWhileGameRunning(TimeSpan.FromSeconds(30))) break; continue; }
                         UpdateConnectionUi();
                     }
                     if (autoQueueActive && notifications == null)
@@ -955,7 +1233,7 @@ public sealed class MainWindow : DarkForm
                     {
                         Report("ログインを再接続中");
                         var refreshed = await RefreshAccountSession(ct, forceBrowser: true);
-                        await Task.Delay(refreshed ? TimeSpan.FromMilliseconds(TransientFailureIntervalMilliseconds) : TimeSpan.FromSeconds(30), ct);
+                        if (!await WaitWhileGameRunning(refreshed ? TimeSpan.FromMilliseconds(TransientFailureIntervalMilliseconds) : TimeSpan.FromSeconds(30))) break;
                         continue;
                     }
                     var message = e.Status == 429 ? "混雑中 · 自動で再接続します" : e.Status == 404 ? "マッチを検索中" : "接続を再確認中";
@@ -972,7 +1250,17 @@ public sealed class MainWindow : DarkForm
             }
         }
         catch (OperationCanceledException) { }
-        catch { Report("監視を停止しました · 再接続してお試しください"); }
+        catch
+        {
+            if (!valorantRunning())
+            {
+                pickMonitoring = false;
+                autoQueueActive = false;
+                trayWarningText = "VALORANTが終了したため停止しました";
+                Report("VALORANTが終了したため監視を停止しました");
+            }
+            else Report("監視を停止しました · 再接続してお試しください");
+        }
         finally
         {
             notificationsStop.Cancel();
@@ -981,8 +1269,11 @@ public sealed class MainWindow : DarkForm
             if (notificationChecks != null) { try { await notificationChecks; } catch (Exception) { } }
             monitor?.Dispose(); monitor = null;
             monitorTask = null; queueEngine = null; pickMonitoring = false; autoQueueActive = false;
-            SetInputEnabled(true); UpdateMap("");
+            ResolvePendingAgent();
+            if (!busy && !closing) SetInputEnabled(true);
+            UpdateMap("");
             status.Text = "停止中"; status.ForeColor = Theme.Muted;
+            ledPulseTimer.Stop();
             statusLed?.Invalidate();
             UpdateConnectionUi();
         }
@@ -994,7 +1285,7 @@ public sealed class MainWindow : DarkForm
         var activeQueue = queueToCancel ?? (autoQueueActive ? queueEngine : null);
         pickMonitoring = false; autoQueueActive = false;
         var source = monitor;
-        if (source == null && activeQueue == null) { UpdateConnectionUi(); return Task.CompletedTask; }
+        if (source == null && activeQueue == null && queueLeaveTask is not { IsCompleted: false }) { UpdateConnectionUi(); return Task.CompletedTask; }
 
         stopping = true;
         status.Text = "停止中"; status.ForeColor = Theme.Muted;
@@ -1103,14 +1394,19 @@ public sealed class MainWindow : DarkForm
         agents = updated;
         mainAgent = AgentCatalog.ResolveSelection(agents, mainAgent);
         // A running monitor captured its settings at start; resolving now would make the hero disagree with it.
-        if (mainAgent == null && pendingAgentId.Length > 0 && monitor == null)
-        {
-            mainAgent = agents.FirstOrDefault(a => a.Id.Equals(pendingAgentId, StringComparison.OrdinalIgnoreCase));
-            if (mainAgent != null) pendingAgentId = "";
-        }
+        ResolvePendingAgent();
         SetHero();
         UpdateAgentAccessUi();
         matchHistory?.UpdateAgents(agents);
+    }
+
+    private void ResolvePendingAgent()
+    {
+        if (monitor != null || mainAgent != null || pendingAgentId.Length == 0) return;
+        mainAgent = agents.FirstOrDefault(a => a.Id.Equals(pendingAgentId, StringComparison.OrdinalIgnoreCase));
+        if (mainAgent is null) return;
+        pendingAgentId = "";
+        SetHero();
     }
 
     private void Report(string text)
@@ -1131,8 +1427,46 @@ public sealed class MainWindow : DarkForm
         ClientUnavailableException c => c.Message,
         _ => "接続できませんでした · ネットワークをご確認ください"
     };
-    private void Restore() { Show(); WindowState = FormWindowState.Normal; Activate(); }
-    private static Label FieldLabel(string text) => new() { Text = text, Dock = DockStyle.Fill, Margin = new Padding(0, 1, 5, 0), ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleLeft, Font = new Font("Yu Gothic UI", 10) };
+    private void Restore()
+    {
+        WindowState = restoreState;
+        Show();
+        if (monitor != null && System.Windows.SystemParameters.ClientAreaAnimation) ledPulseTimer.Start();
+        // A modal child disables this window. Restoring only the owner can leave
+        // the actual dialog behind it (or minimized), making the app appear stuck.
+        Form target = this;
+        while (target.OwnedForms.LastOrDefault(form => form.Modal && !form.IsDisposed) is { } modal)
+            target = modal;
+        if (target.WindowState == FormWindowState.Minimized) target.WindowState = FormWindowState.Normal;
+        if (!target.Visible) target.Show();
+        target.BringToFront();
+        target.Activate();
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        // Page shortcuts work from anywhere in the window; disabled tabs keep their usual restrictions.
+        ThemedButton? target = null;
+        if ((keyData & Keys.Modifiers) == Keys.Control)
+        {
+            var key = keyData & Keys.KeyCode;
+            if (key is Keys.D1 or Keys.NumPad1) target = dashboardTab;
+            else if (key is Keys.D2 or Keys.NumPad2) target = matchHistoryButton;
+            else if (key is Keys.D3 or Keys.NumPad3) target = storeTab;
+        }
+        if (target != null)
+        {
+            if (target.Enabled && target.Visible) target.PerformClick();
+            return true;
+        }
+        if (keyData == Keys.F5 && !closing)
+        {
+            if (selectedPage == MainPage.MatchHistory && matchHistory != null) { _ = matchHistory.RefreshFromShortcutAsync(); return true; }
+            if (selectedPage == MainPage.Store && storePreview != null) { _ = storePreview.RefreshFromShortcutAsync(); return true; }
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+    private static Label FieldLabel(string text) => new() { Text = text, Dock = DockStyle.Fill, Margin = new Padding(0, 1, 5, 0), ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleLeft, Font = SharedFonts.Get("Yu Gothic UI", 10) };
     private static ThemedSelect RegionCombo() => new(["自動（おすすめ）", "アジア太平洋（東京など）", "北アメリカ", "ヨーロッパ", "韓国", "ブラジル", "ラテンアメリカ", "テスト環境（PBE）"])
     { AccessibleName = "アカウントの接続地域" };
 }

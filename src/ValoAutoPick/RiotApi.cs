@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -9,6 +10,8 @@ namespace ValoAutoPick;
 
 public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
 {
+    private static readonly string ClientPlatformHeader = Convert.ToBase64String(
+        Encoding.UTF8.GetBytes("{\"platformType\":\"PC\",\"platformOS\":\"Windows\",\"platformOSVersion\":\"10.0.19042.1.256.64bit\",\"platformChipset\":\"Unknown\"}"));
     private readonly HttpClient remote = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(8) };
     private readonly HttpClient local = new(new HttpClientHandler
     {
@@ -16,21 +19,38 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         // Riot Client uses a self-signed certificate. This client is used ONLY for fixed loopback URLs.
         ServerCertificateCustomValidationCallback = (request, _, _, _) => request.RequestUri is { Host: "127.0.0.1", Scheme: "https" }
     }) { Timeout = TimeSpan.FromSeconds(4) };
-    private string access = "", entitlement = "", version = "", server = "", playerDataServer = "", fingerprint = "";
-    private DateTimeOffset refreshed;
+    private sealed record RiotSession(
+        string Access, string Entitlement, string Version, string Server, string PlayerDataServer, string Fingerprint,
+        DateTimeOffset Refreshed, string Subject, string RegionLabel, string AccountName, DateTimeOffset ExpiresAt, bool HasAccountSession)
+    {
+        public static RiotSession Empty { get; } = new("", "", "", "", "", "", DateTimeOffset.MinValue,
+            "", "", "", DateTimeOffset.MinValue, false);
+    }
+
+    private RiotSession session = RiotSession.Empty;
+    private readonly object sessionGate = new();
+    private long sessionEpoch;
+    private RiotSession CurrentSession => Volatile.Read(ref session);
     private DateTimeOffset readinessConnectionCheck;
     private string readinessSubject = "";
     private bool readinessLocalAccount;
-    private string readinessLogMatch = "";
-    private long readinessLogLength = -1;
-    private DateTime readinessLogModified;
-    private bool readinessLogResult;
-    public string Subject { get; private set; } = "";
-    public string RegionLabel { get; private set; } = "";
-    public string AccountName { get; private set; } = "";
-    public DateTimeOffset ExpiresAt { get; private set; }
-    public bool HasAccountSession { get; private set; }
-    public void Invalidate() => refreshed = DateTimeOffset.MinValue;
+    public string Subject => CurrentSession.Subject;
+    public string RegionLabel => CurrentSession.RegionLabel;
+    public string AccountName => CurrentSession.AccountName;
+    public DateTimeOffset ExpiresAt => CurrentSession.ExpiresAt;
+    public bool HasAccountSession => CurrentSession.HasAccountSession;
+    public void Invalidate()
+    {
+        while (true)
+        {
+            var current = CurrentSession;
+            var invalidated = current with { Refreshed = DateTimeOffset.MinValue };
+            if (ReferenceEquals(Interlocked.CompareExchange(ref session, invalidated, current), current)) return;
+        }
+    }
+
+    private void Invalidate(RiotSession expected) =>
+        Interlocked.CompareExchange(ref session, expected with { Refreshed = DateTimeOffset.MinValue }, expected);
 
     public static bool IsValorantRunning()
     {
@@ -47,23 +67,32 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
 
     public void Logout()
     {
-        access = entitlement = Subject = AccountName = fingerprint = playerDataServer = "";
-        HasAccountSession = false; ExpiresAt = DateTimeOffset.MinValue; Invalidate();
+        lock (sessionGate)
+        {
+            Interlocked.Increment(ref sessionEpoch);
+            Interlocked.Exchange(ref session, RiotSession.Empty);
+        }
+        readinessSubject = "";
+        readinessLocalAccount = false;
+        readinessConnectionCheck = DateTimeOffset.MinValue;
     }
 
     public async Task Login(AuthResult auth, string regionSetting, CancellationToken ct, string? expectedSubject = null)
     {
+        long epoch;
+        lock (sessionGate) epoch = Interlocked.Increment(ref sessionEpoch);
         // Tokens are deliberately held in memory only. All service URLs are fixed and HTTPS.
         using var info = await AuthRequest(HttpMethod.Get, "https://auth.riotgames.com/userinfo", auth.AccessToken, null, ct);
-        var subject = Text(info.RootElement, "sub");
+        var subject = RequiredString(info.RootElement, "sub");
         if (!Guid.TryParse(subject, out _)) throw new InvalidDataException("ログイン情報を確認できませんでした");
         if (expectedSubject != null && !subject.Equals(expectedSubject, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("ログイン中のアカウントが一致しません");
         using var ent = await AuthRequest(HttpMethod.Post, "https://entitlements.auth.riotgames.com/api/token/v1", auth.AccessToken, "{}", ct);
         using var geo = await AuthRequest(HttpMethod.Put, "https://riot-geo.pas.si.riotgames.com/pas/v1/product/valorant", auth.AccessToken,
             JsonSerializer.Serialize(new { id_token = auth.IdToken }), ct);
-        var region = Text(geo.RootElement.GetProperty("affinities"), "live");
-        if (regionSetting != "auto") region = regionSetting;
+        var region = regionSetting == "auto"
+            ? RequiredString(RequiredProperty(geo.RootElement, "affinities"), "live")
+            : regionSetting;
         var shard = region is "latam" or "br" ? "na" : region;
         if (region == "pbe") region = "na";
         if (!new[] { "na", "eu", "ap", "kr", "latam", "br" }.Contains(region))
@@ -71,20 +100,22 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         using var verResponse = await remote.GetAsync("https://valorant-api.com/v1/version", ct);
         verResponse.EnsureSuccessStatusCode();
         using var ver = JsonDocument.Parse(await verResponse.Content.ReadAsStringAsync(ct));
-        var newVersion = Text(ver.RootElement.GetProperty("data"), "riotClientVersion");
-        var newEnt = Text(ent.RootElement, "entitlements_token");
-        if (newVersion.Length == 0 || newEnt.Length == 0) throw new InvalidDataException("接続情報を取得できませんでした");
+        var newVersion = RequiredString(RequiredProperty(ver.RootElement, "data"), "riotClientVersion");
+        var newEnt = RequiredString(ent.RootElement, "entitlements_token");
         var name = "ログイン済み";
         if (info.RootElement.TryGetProperty("acct", out var acct))
         {
             var gameName = Text(acct, "game_name"); var tag = Text(acct, "tag_line");
             if (gameName.Length > 0) name = gameName + "#" + tag;
         }
-        access = auth.AccessToken; entitlement = newEnt; Subject = subject; version = newVersion;
-        server = $"https://glz-{region}-1.{shard}.a.pvp.net";
-        playerDataServer = $"https://pd.{shard}.a.pvp.net";
-        RegionLabel = RegionDisplay.Name(region, shard);
-        AccountName = name; ExpiresAt = auth.ExpiresAt; HasAccountSession = true;
+        lock (sessionGate)
+        {
+            if (Interlocked.Read(ref sessionEpoch) != epoch) return;
+            Interlocked.Exchange(ref session, new RiotSession(
+                auth.AccessToken, newEnt, newVersion, $"https://glz-{region}-1.{shard}.a.pvp.net",
+                $"https://pd.{shard}.a.pvp.net", "", DateTimeOffset.MinValue,
+                subject, RegionDisplay.Name(region, shard), name, auth.ExpiresAt, true));
+        }
     }
 
     private async Task<JsonDocument> AuthRequest(HttpMethod method, string url, string token, string? body, CancellationToken ct)
@@ -99,6 +130,45 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
 
     public async Task EnsureConnected(string regionSetting, CancellationToken ct, string? expectedSubject = null)
     {
+        var (raw, port, password) = ReadRiotClientConnection();
+        var key = raw + "|" + regionSetting;
+        var epoch = Interlocked.Read(ref sessionEpoch);
+        var current = CurrentSession;
+        if (current.Fingerprint == key && DateTimeOffset.UtcNow - current.Refreshed < TimeSpan.FromSeconds(30) &&
+            (expectedSubject == null || string.Equals(expectedSubject, current.Subject, StringComparison.OrdinalIgnoreCase))) return;
+        using var token = await LocalGet(port, password, "/entitlements/v1/token", ct);
+        var subject = RequiredString(token.RootElement, "subject");
+        var newAccess = RequiredString(token.RootElement, "accessToken");
+        var newEntitlement = RequiredString(token.RootElement, "token");
+        if (expectedSubject != null && (TokenExpiry(newAccess) is not { } expires || expires <= DateTimeOffset.UtcNow.AddMinutes(3)))
+            throw new ClientUnavailableException("Riot Clientのトークンの更新を待っています");
+        if (!Guid.TryParse(subject, out _)) throw new InvalidDataException("Riot Clientのアカウント情報が不正です");
+        if (expectedSubject != null && !string.Equals(subject, expectedSubject, StringComparison.OrdinalIgnoreCase))
+            throw new ClientUnavailableException("Riot Clientのアカウントが一致しません");
+        using var sessions = await LocalGet(port, password, "/product-session/v1/external-sessions", ct);
+        var game = sessions.RootElement.EnumerateObject().Select(x => x.Value)
+            .FirstOrDefault(x => Text(x, "productId") == "valorant" && Text(x, "phase") != "Stopped");
+        if (game.ValueKind != JsonValueKind.Object)
+            throw new ClientUnavailableException("VALORANTの起動を待っています");
+        var log = ReadValorantLog();
+        var (region, shard) = ResolveLocalRegion(game, regionSetting, log);
+        var clientVersion = ResolveLocalVersion(game, log);
+        var sameAccount = current.Subject.Equals(subject, StringComparison.OrdinalIgnoreCase);
+        var refreshed = new RiotSession(
+            newAccess, newEntitlement, clientVersion, $"https://glz-{region}-1.{shard}.a.pvp.net",
+            $"https://pd.{shard}.a.pvp.net", key, DateTimeOffset.UtcNow, subject,
+            RegionDisplay.Name(region, shard), sameAccount ? current.AccountName : "",
+            sameAccount ? current.ExpiresAt : DateTimeOffset.MinValue,
+            sameAccount && current.HasAccountSession);
+        lock (sessionGate)
+        {
+            if (Interlocked.Read(ref sessionEpoch) != epoch || !ReferenceEquals(CurrentSession, current)) return;
+            Interlocked.Exchange(ref session, refreshed);
+        }
+    }
+
+    private static (string Raw, int Port, string Password) ReadRiotClientConnection()
+    {
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Riot Games", "Riot Client", "Config", "lockfile");
         string raw;
         try { raw = ReadShared(path, 4096).Trim(); }
@@ -110,31 +180,31 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         try
         {
             using var process = Process.GetProcessById(pid);
-            if (!process.ProcessName.StartsWith("RiotClient", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException();
+            if (!process.ProcessName.StartsWith("RiotClient", StringComparison.OrdinalIgnoreCase))
+                throw new ClientUnavailableException("Riot Clientの起動を待っています");
         }
-        catch (ArgumentException) { throw new ClientUnavailableException("Riot Clientの起動を待っています"); }
-        var key = raw + "|" + regionSetting;
-        if (fingerprint == key && DateTimeOffset.UtcNow - refreshed < TimeSpan.FromSeconds(30) &&
-            (expectedSubject == null || string.Equals(expectedSubject, Subject, StringComparison.OrdinalIgnoreCase))) return;
-        using var token = await LocalGet(port, parts[3], "/entitlements/v1/token", ct);
-        var subject = token.RootElement.GetProperty("subject").GetString() ?? "";
-        var newAccess = token.RootElement.GetProperty("accessToken").GetString() ?? "";
-        var newEntitlement = token.RootElement.GetProperty("token").GetString() ?? "";
-        if (!Guid.TryParse(subject, out _) || newAccess.Length == 0 || newEntitlement.Length == 0)
-            throw new ClientUnavailableException("Riot Clientへのログインを待っています");
-        if (expectedSubject != null && !string.Equals(subject, expectedSubject, StringComparison.OrdinalIgnoreCase))
-            throw new ClientUnavailableException("Riot Clientのアカウントが一致しません");
-        using var sessions = await LocalGet(port, parts[3], "/product-session/v1/external-sessions", ct);
-        var game = sessions.RootElement.EnumerateObject().Select(x => x.Value)
-            .FirstOrDefault(x => Text(x, "productId") == "valorant" && Text(x, "phase") != "Stopped");
-        if (game.ValueKind != JsonValueKind.Object)
-            throw new ClientUnavailableException("VALORANTの起動を待っています");
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        { throw new ClientUnavailableException("Riot Clientの起動を待っています"); }
+        return (raw, port, parts[3]);
+    }
+
+    private static string ReadValorantLog()
+    {
+        string log = "";
+        var logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VALORANT", "Saved", "Logs", "ShooterGame.log");
+        try { log = ReadShared(logPath, 8 * 1024 * 1024); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // The log is optional; deployment and the selected region can still resolve the server.
+        }
+        return log;
+    }
+
+    internal static (string Region, string Shard) ResolveLocalRegion(JsonElement game, string regionSetting, string log)
+    {
         var deployment = "";
         if (game.TryGetProperty("launchConfiguration", out var launch) && launch.TryGetProperty("arguments", out var args))
             deployment = args.EnumerateArray().Select(a => a.GetString() ?? "").FirstOrDefault(a => a.StartsWith("-ares-deployment="))?.Split('=', 2)[1] ?? "";
-        string log = "";
-        var logPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VALORANT", "Saved", "Logs", "ShooterGame.log");
-        try { log = ReadShared(logPath, 8 * 1024 * 1024); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         var logServers = Regex.Matches(log, @"https://glz-(na|eu|ap|kr|br|latam)-1\.(na|eu|ap|kr|pbe)\.a\.pvp\.net");
         var region = regionSetting == "auto" ? deployment : regionSetting;
         var shard = region is "br" or "latam" ? "na" : region;
@@ -145,26 +215,32 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
             region = logServers[^1].Groups[1].Value; shard = logServers[^1].Groups[2].Value;
         }
         if (regionSetting == "auto" && Text(game, "patchlineId") == "pbe") { region = "na"; shard = "pbe"; }
+        return (region, shard);
+    }
+
+    internal static string ResolveLocalVersion(JsonElement game, string log)
+    {
         var versions = Regex.Matches(log, @"CI server version:\s*([\w.\-]+)");
         var clientVersion = Text(game, "version");
         if (!clientVersion.StartsWith("release-")) clientVersion = versions.Count > 0 ? versions[^1].Groups[1].Value : "";
         if (clientVersion.Length == 0) throw new ClientUnavailableException("ゲームのバージョン情報を待っています");
-        Subject = subject; access = newAccess; entitlement = newEntitlement; version = clientVersion;
-        server = $"https://glz-{region}-1.{shard}.a.pvp.net";
-        playerDataServer = $"https://pd.{shard}.a.pvp.net";
-        fingerprint = key; refreshed = DateTimeOffset.UtcNow; RegionLabel = RegionDisplay.Name(region, shard);
+        return clientVersion;
     }
 
     public async Task<bool> TryRefreshAccountFromLocal(string regionSetting, CancellationToken ct)
     {
-        if (!HasAccountSession || !Guid.TryParse(Subject, out _)) return false;
-        var expected = Subject;
+        var before = CurrentSession;
+        if (!before.HasAccountSession || !Guid.TryParse(before.Subject, out _)) return false;
+        var expected = before.Subject;
         if (await GetLocalEventConnection(expected, ct) == null) return false;
         try { await EnsureConnected(regionSetting, ct, expected); }
-        catch (ClientUnavailableException) { return false; }
-        var expires = TokenExpiry(access);
+        catch (Exception e) when (e is ClientUnavailableException or IOException or UnauthorizedAccessException or HttpRequestException or System.ComponentModel.Win32Exception or InvalidOperationException or JsonException) { return false; }
+        var refreshedSession = CurrentSession;
+        if (!refreshedSession.Subject.Equals(expected, StringComparison.OrdinalIgnoreCase) || !refreshedSession.HasAccountSession) return false;
+        var expires = TokenExpiry(refreshedSession.Access);
         if (expires == null || expires <= DateTimeOffset.UtcNow.AddMinutes(3)) return false;
-        ExpiresAt = expires.Value;
+        var updated = refreshedSession with { ExpiresAt = expires.Value };
+        if (!ReferenceEquals(Interlocked.CompareExchange(ref session, updated, refreshedSession), refreshedSession)) return false;
         return true;
     }
 
@@ -195,6 +271,13 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         stream.ReadExactly(bytes.AsSpan(half, half));
         return Encoding.UTF8.GetString(bytes);
     }
+    internal static string ReadTailShared(string path, int maxBytes)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        stream.Seek(Math.Max(0, stream.Length - maxBytes), SeekOrigin.Begin);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
     private async Task<JsonDocument> LocalGet(int port, string password, string path, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, $"https://127.0.0.1:{port}{path}");
@@ -223,20 +306,25 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
             HttpRequestException or ClientUnavailableException or JsonException) { return null; }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
     }
-    private async Task<JsonDocument?> Request(HttpMethod method, string path, bool missingIsIdle, CancellationToken ct, bool playerData = false, string? jsonBody = null)
+    private async Task<JsonDocument?> Request(HttpMethod method, string path, bool missingIsIdle, CancellationToken ct,
+        bool playerData = false, string? jsonBody = null, RiotSession? sessionSnapshot = null)
     {
-        using var request = new HttpRequestMessage(method, (playerData ? playerDataServer : server) + path);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access);
-        request.Headers.Add("X-Riot-Entitlements-JWT", entitlement);
-        request.Headers.Add("X-Riot-ClientVersion", version);
-        request.Headers.Add("X-Riot-ClientPlatform", Convert.ToBase64String(Encoding.UTF8.GetBytes("{\"platformType\":\"PC\",\"platformOS\":\"Windows\",\"platformOSVersion\":\"10.0.19042.1.256.64bit\",\"platformChipset\":\"Unknown\"}")));
+        var current = sessionSnapshot ?? CurrentSession;
+        var baseUrl = playerData ? current.PlayerDataServer : current.Server;
+        if (baseUrl.Length == 0 || current.Access.Length == 0 || current.Entitlement.Length == 0)
+            throw new InvalidOperationException("アカウントに接続してください");
+        using var request = new HttpRequestMessage(method, baseUrl + path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", current.Access);
+        request.Headers.Add("X-Riot-Entitlements-JWT", current.Entitlement);
+        request.Headers.Add("X-Riot-ClientVersion", current.Version);
+        request.Headers.Add("X-Riot-ClientPlatform", ClientPlatformHeader);
         if (jsonBody is not null || method == HttpMethod.Post)
             request.Content = new StringContent(jsonBody ?? "{}", Encoding.UTF8, "application/json");
         using var response = await remote.SendAsync(request, ct);
         if (response.StatusCode == HttpStatusCode.NotFound && missingIsIdle) return null;
         if (!response.IsSuccessStatusCode)
         {
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) Invalidate();
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) Invalidate(current);
             var retry = response.Headers.RetryAfter?.Delta?.TotalSeconds
                 ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow)?.TotalSeconds ?? 5;
             throw new ApiException((int)response.StatusCode, (int)Math.Ceiling(retry));
@@ -247,24 +335,28 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     private const string AgentItemType = "01bb38e1-da47-4e6a-9b3d-945fe4655707";
     public async Task<HashSet<string>> GetOwnedAgents(CancellationToken ct, IEnumerable<Agent>? catalogue = null)
     {
-        EnsurePlayerDataSession();
-        using var result = await Request(HttpMethod.Get, $"/store/v1/entitlements/{Subject}/{AgentItemType}", false, ct, playerData: true);
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
+        using var result = await Request(HttpMethod.Get, $"/store/v1/entitlements/{current.Subject}/{AgentItemType}", false, ct, playerData: true, sessionSnapshot: current);
         return AgentAccess.WithBaseAgents(ParseOwnedAgents(result!.RootElement), catalogue);
     }
     public async Task<JsonDocument> GetStorefrontResponse(CancellationToken ct)
     {
-        EnsurePlayerDataSession();
-        return (await Request(HttpMethod.Post, $"/store/v3/storefront/{Subject}", false, ct, playerData: true))!;
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
+        return (await Request(HttpMethod.Post, $"/store/v3/storefront/{current.Subject}", false, ct, playerData: true, sessionSnapshot: current))!;
     }
-    public async Task<IReadOnlyList<RiotMatchHistoryEntry>> GetMatchHistory(int startIndex, int pageSize, CancellationToken ct, string? queue = null)
+    public async Task<RiotMatchHistoryPage> GetMatchHistory(int startIndex, int pageSize, CancellationToken ct, string? queue = null)
     {
-        EnsurePlayerDataSession();
-        if (startIndex < 0 || pageSize is < 1 or > 20) throw new ArgumentOutOfRangeException(nameof(pageSize));
-        var endIndex = checked(startIndex + pageSize - 1);
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
+        if (startIndex < 0) throw new ArgumentOutOfRangeException(nameof(startIndex));
+        if (pageSize is < 1 or > 20) throw new ArgumentOutOfRangeException(nameof(pageSize));
+        var endIndex = checked(startIndex + pageSize);
         var queueFilter = string.IsNullOrWhiteSpace(queue) ? "" : "&queue=" + Uri.EscapeDataString(queue);
         using var result = await Request(HttpMethod.Get,
-            $"/match-history/v1/history/{Subject}?startIndex={startIndex}&endIndex={endIndex}{queueFilter}",
-            false, ct, playerData: true);
+            $"/match-history/v1/history/{current.Subject}?startIndex={startIndex}&endIndex={endIndex}{queueFilter}",
+            false, ct, playerData: true, sessionSnapshot: current);
         var root = result!.RootElement;
         if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("History", out var history) || history.ValueKind != JsonValueKind.Array)
             throw new InvalidDataException("試合履歴の形式を読み取れませんでした");
@@ -276,23 +368,26 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
             if (!Guid.TryParse(id, out _) || started <= 0) continue;
             entries.Add(new(id, started, Text(entry, "QueueID")));
         }
-        return entries;
+        int? total = root.TryGetProperty("Total", out var totalValue) && totalValue.ValueKind == JsonValueKind.Number && totalValue.TryGetInt32(out var value) && value >= 0 ? value : null;
+        return new RiotMatchHistoryPage(entries, history.GetArrayLength(), total);
     }
     public async Task<JsonDocument?> GetMatchDetails(string matchId, CancellationToken ct)
     {
-        EnsurePlayerDataSession();
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
         ValidateId(matchId);
-        return await Request(HttpMethod.Get, $"/match-details/v1/matches/{matchId}", true, ct, playerData: true);
+        return await Request(HttpMethod.Get, $"/match-details/v1/matches/{matchId}", true, ct, playerData: true, sessionSnapshot: current);
     }
     public async Task<IReadOnlyDictionary<string, (string GameName, string TagLine)>> GetPlayerNames(IEnumerable<string> subjects, CancellationToken ct)
     {
-        EnsurePlayerDataSession();
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
         var ids = subjects.Where(id => Guid.TryParse(id, out _)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var names = new Dictionary<string, (string GameName, string TagLine)>(StringComparer.OrdinalIgnoreCase);
         foreach (var batch in ids.Chunk(20))
         {
             using var result = await Request(HttpMethod.Put, "/name-service/v2/players", false, ct,
-                playerData: true, jsonBody: JsonSerializer.Serialize(batch));
+                playerData: true, jsonBody: JsonSerializer.Serialize(batch), sessionSnapshot: current);
             if (result?.RootElement.ValueKind != JsonValueKind.Array) continue;
             foreach (var player in result.RootElement.EnumerateArray())
             {
@@ -305,9 +400,10 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         }
         return names;
     }
-    private void EnsurePlayerDataSession()
+    private void EnsurePlayerDataSession(RiotSession? snapshot = null)
     {
-        if (!Guid.TryParse(Subject, out _) || playerDataServer.Length == 0 || access.Length == 0 || entitlement.Length == 0)
+        var current = snapshot ?? CurrentSession;
+        if (!Guid.TryParse(current.Subject, out _) || current.PlayerDataServer.Length == 0 || current.Access.Length == 0 || current.Entitlement.Length == 0)
             throw new InvalidOperationException("アカウントに接続してください");
     }
     internal static HashSet<string> ParseOwnedAgents(JsonElement root)
@@ -333,14 +429,16 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     }
     public async Task<string?> GetMatchId(CancellationToken ct)
     {
-        using var result = await Request(HttpMethod.Get, $"/pregame/v1/players/{Subject}", true, ct);
+        var current = CurrentSession;
+        using var result = await Request(HttpMethod.Get, $"/pregame/v1/players/{current.Subject}", true, ct, sessionSnapshot: current);
         if (result == null) return null;
         var id = Text(result.RootElement, "MatchID");
         return Guid.TryParse(id, out _) ? id : null;
     }
     public async Task<string?> GetCoreMatchId(CancellationToken ct)
     {
-        using var result = await Request(HttpMethod.Get, $"/core-game/v1/players/{Subject}", true, ct);
+        var current = CurrentSession;
+        using var result = await Request(HttpMethod.Get, $"/core-game/v1/players/{current.Subject}", true, ct, sessionSnapshot: current);
         if (result == null) return null;
         var id = Text(result.RootElement, "MatchID");
         if (!Guid.TryParse(id, out _)) throw new InvalidDataException("試合情報が不正です");
@@ -349,7 +447,8 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     public async Task<string?> GetCoreMapId(string matchId, CancellationToken ct)
     {
         ValidateId(matchId);
-        using var result = await Request(HttpMethod.Get, $"/core-game/v1/matches/{matchId}", true, ct);
+        var current = CurrentSession;
+        using var result = await Request(HttpMethod.Get, $"/core-game/v1/matches/{matchId}", true, ct, sessionSnapshot: current);
         if (result == null) return null;
         var root = result.RootElement;
         if (root.ValueKind != JsonValueKind.Object || !string.Equals(Text(root, "MatchID"), matchId, StringComparison.OrdinalIgnoreCase))
@@ -359,11 +458,12 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     }
     public async Task<string?> GetPartyState(CancellationToken ct)
     {
-        using var player = await Request(HttpMethod.Get, $"/parties/v1/players/{Subject}", true, ct);
+        var current = CurrentSession;
+        using var player = await Request(HttpMethod.Get, $"/parties/v1/players/{current.Subject}", true, ct, sessionSnapshot: current);
         if (player == null) return null;
         var partyId = Text(player.RootElement, "CurrentPartyID");
         if (!Guid.TryParse(partyId, out _)) throw new InvalidDataException("パーティー情報が不正です");
-        using var party = await Request(HttpMethod.Get, $"/parties/v1/parties/{partyId}", true, ct);
+        using var party = await Request(HttpMethod.Get, $"/parties/v1/parties/{partyId}", true, ct, sessionSnapshot: current);
         if (party == null) return null;
         var root = party.RootElement;
         if (root.ValueKind != JsonValueKind.Object || !string.Equals(Text(root, "ID"), partyId, StringComparison.OrdinalIgnoreCase))
@@ -374,38 +474,32 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     public async Task<bool?> IsCharacterSelectReady(string matchId, CancellationToken ct)
     {
         ValidateId(matchId);
-        if (!await HasMatchingLocalAccount(ct)) return null;
+        var current = CurrentSession;
+        if (!await HasMatchingLocalAccount(current, ct)) return null;
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VALORANT", "Saved", "Logs", "ShooterGame.log");
         try
         {
-            var info = new FileInfo(path);
-            if (info.Exists && readinessLogMatch == matchId && readinessLogLength == info.Length && readinessLogModified == info.LastWriteTimeUtc)
-                return readinessLogResult;
-            var result = CharacterSelectReadyFromLog(ReadShared(path, 512 * 1024), matchId) ?? false;
-            // Cache only a stable read; if the game wrote during the read, retry on the next tick.
-            var after = new FileInfo(path);
-            if (info.Exists && after.Exists && info.Length == after.Length && info.LastWriteTimeUtc == after.LastWriteTimeUtc)
-            { readinessLogMatch = matchId; readinessLogLength = info.Length; readinessLogModified = info.LastWriteTimeUtc; readinessLogResult = result; }
-            return result;
+            return CharacterSelectReadyFromLog(ReadTailShared(path, 512 * 1024), matchId);
         }
         // A matching local client is present, so do not pick before its screen state can be read.
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
     }
-    private async Task<bool> HasMatchingLocalAccount(CancellationToken ct)
+    private async Task<bool> HasMatchingLocalAccount(RiotSession current, CancellationToken ct)
     {
-        if (!string.Equals(readinessSubject, Subject, StringComparison.OrdinalIgnoreCase) || DateTimeOffset.UtcNow >= readinessConnectionCheck)
+        var subject = current.Subject;
+        if (!string.Equals(readinessSubject, subject, StringComparison.OrdinalIgnoreCase) || DateTimeOffset.UtcNow >= readinessConnectionCheck)
         {
-            readinessLocalAccount = await GetLocalEventConnection(Subject, ct) != null;
-            readinessSubject = Subject;
+            readinessLocalAccount = await GetLocalEventConnection(subject, ct) != null;
+            readinessSubject = subject;
             readinessConnectionCheck = DateTimeOffset.UtcNow.AddSeconds(3);
         }
-        return readinessLocalAccount;
+        return readinessLocalAccount && CurrentSession.Subject.Equals(subject, StringComparison.OrdinalIgnoreCase);
     }
     public async Task<string?> GetLocalGameFlowState(CancellationToken ct)
     {
-        if (!await HasMatchingLocalAccount(ct)) return null;
+        if (!await HasMatchingLocalAccount(CurrentSession, ct)) return null;
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VALORANT", "Saved", "Logs", "ShooterGame.log");
-        try { return GameFlowStateFromLog(ReadShared(path, 512 * 1024)); }
+        try { return GameFlowStateFromLog(ReadTailShared(path, 512 * 1024)); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }
     internal static string? GameFlowStateFromLog(string log)
@@ -423,7 +517,8 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     public async Task<MatchSnapshot> GetMatch(string matchId, CancellationToken ct)
     {
         ValidateId(matchId);
-        using var result = await Request(HttpMethod.Get, $"/pregame/v1/matches/{matchId}", false, ct);
+        var current = CurrentSession;
+        using var result = await Request(HttpMethod.Get, $"/pregame/v1/matches/{matchId}", false, ct, sessionSnapshot: current);
         var root = result!.RootElement;
         if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("マッチ情報が不正です");
         var players = new List<Player>();
@@ -438,30 +533,32 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     public async Task Lock(string matchId, string agentId, CancellationToken ct) => await Write("lock", matchId, agentId, ct);
     public async Task<bool> IsInMatch(CancellationToken ct)
     {
-        using var core = await Request(HttpMethod.Get, $"/core-game/v1/players/{Subject}", true, ct);
+        var current = CurrentSession;
+        using var core = await Request(HttpMethod.Get, $"/core-game/v1/players/{current.Subject}", true, ct, sessionSnapshot: current);
         if (core != null) return true;
-        using var pregame = await Request(HttpMethod.Get, $"/pregame/v1/players/{Subject}", true, ct);
+        using var pregame = await Request(HttpMethod.Get, $"/pregame/v1/players/{current.Subject}", true, ct, sessionSnapshot: current);
         return pregame != null;
     }
     public async Task<PartyQueueSnapshot> GetQueueSnapshot(CancellationToken ct)
     {
-        using var player = await Request(HttpMethod.Get, $"/parties/v1/players/{Subject}", true, ct);
+        var current = CurrentSession;
+        using var player = await Request(HttpMethod.Get, $"/parties/v1/players/{current.Subject}", true, ct, sessionSnapshot: current);
         if (player == null) throw new ClientUnavailableException("パーティー情報を取得できません");
         var partyId = Text(player.RootElement, "CurrentPartyID");
         ValidateId(partyId);
-        using var party = await Request(HttpMethod.Get, $"/parties/v1/parties/{partyId}", false, ct);
+        using var party = await Request(HttpMethod.Get, $"/parties/v1/parties/{partyId}", false, ct, sessionSnapshot: current);
         var root = party!.RootElement;
         if (root.ValueKind != JsonValueKind.Object || !string.Equals(Text(root, "ID"), partyId, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("パーティー情報が不正です");
         var state = Text(root, "State");
         var queueId = root.TryGetProperty("MatchmakingData", out var matchmaking) ? Text(matchmaking, "QueueID") : "";
         var entryTime = Text(root, "QueueEntryTime");
-        if (!DateTimeOffset.TryParse(entryTime, out _))
+        if (!DateTimeOffset.TryParse(entryTime, CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
             throw new InvalidDataException("キュー状態が不正です");
         var isLeader = false;
         if (root.TryGetProperty("Members", out var members) && members.ValueKind == JsonValueKind.Array)
         {
-            var self = members.EnumerateArray().FirstOrDefault(member => Text(member, "Subject") == Subject);
+            var self = members.EnumerateArray().FirstOrDefault(member => Text(member, "Subject") == current.Subject);
             isLeader = self.ValueKind == JsonValueKind.Object && self.TryGetProperty("IsOwner", out var owner) && owner.ValueKind == JsonValueKind.True;
         }
         if (!root.TryGetProperty("RestrictedSeconds", out var seconds) || seconds.ValueKind != JsonValueKind.Number ||
@@ -500,6 +597,21 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         }
         return result.ToArray();
     }
+    private static JsonElement RequiredProperty(JsonElement element, string name)
+    {
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(name, out var value))
+            throw new InvalidDataException($"Riot response is missing '{name}'.");
+        return value;
+    }
+
+    private static string RequiredString(JsonElement element, string name)
+    {
+        var value = RequiredProperty(element, name);
+        if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
+            throw new InvalidDataException($"Riot response has an invalid '{name}'.");
+        return value.GetString()!;
+    }
+
     private static string Text(JsonElement element, string name) => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
     private static string TextIgnoreCase(JsonElement element, string name)
     {
@@ -509,5 +621,5 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
                 return property.Value.GetString() ?? "";
         return "";
     }
-    public void Dispose() { remote.Dispose(); local.Dispose(); }
+    public void Dispose() { Logout(); remote.Dispose(); local.Dispose(); }
 }

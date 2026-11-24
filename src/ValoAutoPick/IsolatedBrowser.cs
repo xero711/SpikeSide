@@ -3,7 +3,7 @@ using Microsoft.Win32;
 
 namespace ValoAutoPick;
 
-internal sealed class BrowserIsolationException(string message) : Exception(message);
+public sealed class BrowserIsolationException(string message) : Exception(message);
 
 internal static class IsolatedBrowser
 {
@@ -22,6 +22,7 @@ internal static class IsolatedBrowser
         if (HasReparseAncestor(root)) throw new BrowserIsolationException("一時ブラウザープロファイルを作成できません");
         Directory.CreateDirectory(root);
         if (HasReparseAncestor(root)) throw new BrowserIsolationException("一時ブラウザープロファイルを作成できません");
+        CleanupOldProfiles(root);
         var profile = Path.Combine(root, Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(profile);
         if (HasReparseAncestor(profile)) throw new BrowserIsolationException("一時ブラウザープロファイルを作成できません");
@@ -139,6 +140,25 @@ internal static class IsolatedBrowser
             Guid.TryParseExact(Path.GetFileName(candidate), "N", out _);
     }
 
+    internal static void CleanupOldProfiles(string root)
+    {
+        try
+        {
+            if (!Directory.Exists(root) || HasReparseAncestor(root)) return;
+            // Do not touch a profile while any supported browser might still use it.
+            foreach (var name in new[] { "chrome", "msedge", "chromium", "brave", "vivaldi", "firefox" })
+            {
+                var processes = Process.GetProcessesByName(name);
+                try { if (processes.Length != 0) return; }
+                finally { foreach (var process in processes) process.Dispose(); }
+            }
+            foreach (var profile in Directory.EnumerateDirectories(root))
+                if (IsOwnedProfilePath(root, profile) && Directory.GetLastWriteTimeUtc(profile) < DateTime.UtcNow.AddDays(-7))
+                    TryCleanup(root, profile);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or System.ComponentModel.Win32Exception) { }
+    }
+
     internal static bool HasReparseAncestor(string path)
     {
         for (var directory = new DirectoryInfo(path); directory != null; directory = directory.Parent)
@@ -168,6 +188,9 @@ internal static class IsolatedBrowser
                 HasReparseAncestor(profile) || ContainsReparsePoint(profile)) return;
             Directory.Delete(profile, true);
         }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            // The isolated browser may still hold files open; cleanup is best-effort.
+        }
     }
 }

@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 
 namespace ValoAutoPick;
 
@@ -10,17 +11,44 @@ internal static class WindowFrame
     private const int HtCaption = 2, HtLeft = 10, HtRight = 11, HtTop = 12, HtTopLeft = 13, HtTopRight = 14;
     private const int HtBottom = 15, HtBottomLeft = 16, HtBottomRight = 17;
     private const int ScSize = 0xf000, ScMaximize = 0xf030;
+    private const uint MonitorDefaultToNearest = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo { public int Size; public NativeRect Monitor; public NativeRect Work; public uint Flags; }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsZoomed(IntPtr hwnd);
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromRect(ref NativeRect rect, uint flags);
+    [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
 
     internal static bool ProcessMessage(Form form, Control? caption, ref Message message, bool resizable = false)
     {
         if (message.Msg == WmNcCalcSize)
         {
+            // Without a native frame, Windows would size a maximized window past the monitor edges by the
+            // (invisible) border width. Clamp the client area to the monitor's work area instead so nothing is
+            // cut off and the taskbar stays visible. rgrc[0] is the first RECT of NCCALCSIZE_PARAMS.
+            if (resizable && message.WParam != IntPtr.Zero && message.LParam != IntPtr.Zero && IsZoomed(message.HWnd))
+            {
+                var proposed = Marshal.PtrToStructure<NativeRect>(message.LParam);
+                var monitor = MonitorFromRect(ref proposed, MonitorDefaultToNearest);
+                var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+                if (monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref info))
+                    Marshal.StructureToPtr(info.Work, message.LParam, false);
+            }
             message.Result = IntPtr.Zero;
             return true;
         }
 
         var command = message.WParam.ToInt64() & 0xfff0;
-        if (message.Msg == WmSysCommand && (command == ScMaximize || !resizable && command == ScSize))
+        if (message.Msg == WmSysCommand && (!resizable && (command == ScMaximize || command == ScSize)))
         {
             message.Result = IntPtr.Zero;
             return true;
@@ -33,7 +61,8 @@ internal static class WindowFrame
         var client = form.ClientRectangle;
         if (!client.Contains(point)) return false;
 
-        if (resizable)
+        // A maximized window cannot be resized from its edges; those pixels belong to the caption and content.
+        if (resizable && !IsZoomed(message.HWnd))
         {
             var edge = Math.Max(6, UiMetrics.Px(form, 6));
             var left = point.X < edge;
@@ -73,24 +102,32 @@ internal sealed class WindowCaption : Panel
     private const int WmNcHitTest = 0x0084, HtTransparent = -1;
     private readonly Form owner;
     private readonly CaptionButton minimize, close;
+    private readonly CaptionButton? maximize;
     private readonly Font brandFont = new("Segoe UI", UiMetrics.FontSize(9f), FontStyle.Bold);
     private readonly Font detailFont = new("Yu Gothic UI", UiMetrics.FontSize(8.5f), FontStyle.Bold);
 
-    internal WindowCaption(Form owner)
+    internal WindowCaption(Form owner, bool resizable = false)
     {
         this.owner = owner;
         Dock = DockStyle.Top; Height = 40; Margin = Padding.Empty;
-        BackColor = Color.FromArgb(20, 27, 37);
+        BackColor = Theme.Surface;
         DoubleBuffered = true;
         minimize = new CaptionButton(CaptionAction.Minimize, owner);
         close = new CaptionButton(CaptionAction.Close, owner);
-        Controls.Add(minimize); Controls.Add(close);
+        // Only resizable windows get a maximize button; fixed dialogs keep their two-button caption.
+        if (resizable) maximize = new CaptionButton(CaptionAction.Maximize, owner);
+        Controls.Add(minimize);
+        if (maximize != null) Controls.Add(maximize);
+        Controls.Add(close);
         owner.TextChanged += (_, _) => Invalidate();
+        // The caption lives exactly as long as its form, so this handler never outlives either.
+        if (maximize != null) owner.SizeChanged += (_, _) => maximize.UpdateState();
     }
 
     internal void UpdateButtons()
     {
         minimize.Visible = owner.ControlBox && owner.MinimizeBox;
+        if (maximize != null) maximize.Visible = owner.ControlBox && owner.MaximizeBox;
         close.Visible = owner.ControlBox;
     }
 
@@ -128,7 +165,7 @@ internal sealed class WindowCaption : Panel
     }
 }
 
-internal enum CaptionAction { Minimize, Close }
+internal enum CaptionAction { Minimize, Maximize, Close }
 
 internal sealed class CaptionButton : Control
 {
@@ -153,6 +190,7 @@ internal sealed class CaptionButton : Control
         AccessibleName = action switch
         {
             CaptionAction.Minimize => "最小化",
+            CaptionAction.Maximize => owner.WindowState == FormWindowState.Maximized ? "元のサイズに戻す" : "最大化",
             _ => "閉じる"
         };
         Invalidate();
@@ -162,14 +200,24 @@ internal sealed class CaptionButton : Control
     {
         int S(int value) => UiMetrics.Px(this, value);
         var normal = Parent?.BackColor ?? Theme.Surface;
-        var background = InteractionMotion.Blend(normal, action == CaptionAction.Close ? Theme.Red : Color.FromArgb(54, 68, 85), motion.Hover);
-        background = InteractionMotion.Blend(background, action == CaptionAction.Close ? Color.FromArgb(179, 36, 51) : Color.FromArgb(13, 19, 27), motion.Press * .85f);
+        var background = InteractionMotion.Blend(normal, action == CaptionAction.Close ? Theme.Red : Theme.Hover, motion.Hover);
+        background = InteractionMotion.Blend(background, action == CaptionAction.Close ? Theme.AccentPressed : Theme.Background, motion.Press * .85f);
         e.Graphics.Clear(background);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var pen = new Pen(Theme.Text, Math.Max(1f, S(1))) { StartCap = LineCap.Square, EndCap = LineCap.Square };
+        using var pen = new Pen(action == CaptionAction.Close && motion.Hover > .6f ? Theme.OnAccent : Theme.Text, Math.Max(1f, S(1))) { StartCap = LineCap.Square, EndCap = LineCap.Square };
         var x = Width / 2; var y = Height / 2 + (int)Math.Round(S(2) * motion.Press);
         if (action == CaptionAction.Minimize)
             e.Graphics.DrawLine(pen, x - S(5), y + S(3), x + S(5), y + S(3));
+        else if (action == CaptionAction.Maximize)
+        {
+            if (owner.WindowState == FormWindowState.Maximized)
+            {
+                // Restore glyph: a front square with a second one offset behind it.
+                e.Graphics.DrawRectangle(pen, x - S(5), y - S(3), S(8), S(8));
+                e.Graphics.DrawLines(pen, [new Point(x - S(3), y - S(3)), new Point(x - S(3), y - S(5)), new Point(x + S(5), y - S(5)), new Point(x + S(5), y + S(3)), new Point(x + S(3), y + S(3))]);
+            }
+            else e.Graphics.DrawRectangle(pen, x - S(5), y - S(5), S(10), S(10));
+        }
         else if (action == CaptionAction.Close)
         {
             e.Graphics.DrawLine(pen, x - S(5), y - S(5), x + S(5), y + S(5));
@@ -185,6 +233,9 @@ internal sealed class CaptionButton : Control
         switch (action)
         {
             case CaptionAction.Minimize: owner.WindowState = FormWindowState.Minimized; break;
+            case CaptionAction.Maximize:
+                owner.WindowState = owner.WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized;
+                break;
             case CaptionAction.Close: owner.Close(); break;
         }
     }

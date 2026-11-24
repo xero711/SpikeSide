@@ -4,20 +4,24 @@
     <TargetFramework>net9.0-windows10.0.26100.0</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <UseWPF>true</UseWPF>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\SpikeSide.ico</ApplicationIcon>
     <AssemblyName>SpikeSide</AssemblyName>
     <RootNamespace>ValoAutoPick</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>SpikeSide</Product>
     <AssemblyTitle>SpikeSide</AssemblyTitle>
     <Description>SpikeSide</Description>
+    <NuGetAuditLevel>moderate</NuGetAuditLevel>
   </PropertyGroup>
   <PropertyGroup Condition="'$(TrialBuild)' == 'true'">
     <DefineConstants>$(DefineConstants);TRIAL</DefineConstants>
     <AssemblyName>SpikeSide-Trial</AssemblyName>
+    <Product>SpikeSide 体験版</Product>
     <AssemblyTitle>SpikeSide 体験版</AssemblyTitle>
     <Description>SpikeSide 体験版</Description>
   </PropertyGroup>

@@ -21,6 +21,7 @@
     <Compile Include="../src/ValoAutoPick/NotificationRelay.cs" Link="NotificationRelay.cs" />
     <Compile Include="../src/ValoAutoPick/MatchAnalyticsEngine.cs" Link="MatchAnalyticsEngine.cs" />
     <Compile Include="../src/ValoAutoPick/MatchHistoryArchive.cs" Link="MatchHistoryArchive.cs" />
+    <Compile Include="../src/ValoAutoPick/StorefrontModels.cs" Link="StorefrontModels.cs" />
     <Compile Include="../src/ValoAutoPick/MatchHistorySaveQueue.cs" Link="MatchHistorySaveQueue.cs" />
   </ItemGroup>
 </Project>

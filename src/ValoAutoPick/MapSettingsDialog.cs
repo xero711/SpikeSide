@@ -10,13 +10,14 @@ public sealed class MapSettingsDialog : DarkForm
     public MapSettingsDialog(IReadOnlyList<Agent> agents, Dictionary<string, string> existing, IReadOnlySet<string>? allowed = null)
     {
         Text = "マップ別エージェント設定"; StartPosition = FormStartPosition.CenterParent;
+        MinimizeBox = false;
         ClientSize = new Size(650, 760); MinimumSize = new Size(500, 460);
-        BackColor = Theme.Background; ForeColor = Theme.Text; Font = new Font("Yu Gothic UI", 10);
+        BackColor = Theme.Background; ForeColor = Theme.Text; Font = SharedFonts.Get("Yu Gothic UI", 10);
         MapAgents = new(existing, StringComparer.OrdinalIgnoreCase);
         rows.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42)); rows.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 58));
         rows.RowCount = MapCatalog.Maps.Length + 1;
         var entries = new List<(string Key, ThemedSelect Select)>();
-        var options = new[] { "通常の設定を使用" }.Concat(agents.Select(a => a.Name + (allowed != null && !allowed.Contains(a.Id) ? "（未所有）" : ""))).ToArray();
+        var options = new[] { "通常の設定を使用" }.Concat(agents.Select(a => a.Name + (allowed != null && !allowed.Contains(a.Id) ? "（未解放）" : ""))).ToArray();
         var available = new[] { true }.Concat(agents.Select(a => allowed == null || allowed.Contains(a.Id))).ToArray();
         var hint = new Label { Text = "未設定のマップは通常のエージェントを使用します", Dock = DockStyle.Fill, ForeColor = Theme.Muted, TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true };
         rows.Controls.Add(hint, 0, 0); rows.SetColumnSpan(hint, 2);
@@ -49,6 +50,11 @@ public sealed class MapSettingsDialog : DarkForm
         }
         AttachWheel(viewport); AttachWheel(rows); AttachWheel(scrollBar);
         foreach (Control control in rows.Controls) AttachWheel(control);
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get { var parameters = base.CreateParams; parameters.ExStyle |= 0x02000000; return parameters; }
     }
 
     protected override void OnLoad(EventArgs e) { base.OnLoad(e); ArrangeRows(); }

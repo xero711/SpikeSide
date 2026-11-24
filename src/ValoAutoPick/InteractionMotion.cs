@@ -128,9 +128,9 @@ internal sealed class AnimatedNativeButton : Button
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        var normal = Enabled ? Theme.Elevated : Color.FromArgb(39, 47, 59);
-        var fill = Enabled ? InteractionMotion.Blend(normal, Color.FromArgb(62, 79, 99), motion.Hover) : normal;
-        if (Enabled) fill = InteractionMotion.Blend(fill, Color.FromArgb(15, 21, 30), motion.Press * .8f);
+        var normal = Theme.Elevated;
+        var fill = Enabled ? InteractionMotion.Blend(normal, Theme.Hover, motion.Hover) : normal;
+        if (Enabled) fill = InteractionMotion.Blend(fill, Theme.Background, motion.Press * .8f);
         e.Graphics.Clear(Parent?.BackColor ?? Theme.Surface);
         using var brush = new SolidBrush(fill);
         using var border = new Pen(Enabled ? InteractionMotion.Blend(Theme.Border, Theme.Muted, motion.Hover * .55f) : Theme.Border);

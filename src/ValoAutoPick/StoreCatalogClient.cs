@@ -37,7 +37,7 @@ internal sealed class CatalogClient : IDisposable
     public async Task<CatalogSnapshot> LoadAsync(bool refresh, CancellationToken cancellationToken)
     {
         var cached = await TryReadCacheAsync(cancellationToken);
-        if (!refresh && cached is { } fresh && fresh.HasWeaponImages && DateTimeOffset.UtcNow - fresh.UpdatedAt < CacheLifetime)
+        if (!refresh && cached is { } fresh && fresh.HasWeaponImages && DateTimeOffset.UtcNow - fresh.UpdatedAt is var age && age >= TimeSpan.Zero && age < CacheLifetime)
             return fresh with { FromCache = true };
 
         try
@@ -49,20 +49,24 @@ internal sealed class CatalogClient : IDisposable
             var cardsTask = FetchOptionalListAsync<AccessoryData>(PlayerCardsUri, cancellationToken);
             var spraysTask = FetchOptionalListAsync<AccessoryData>(SpraysUri, cancellationToken);
             await Task.WhenAll(weaponsTask, tiersTask, bundlesTask, buddiesTask, cardsTask, spraysTask);
+            var weapons = await weaponsTask;
+            if (weapons.Count == 0) throw new InvalidDataException("武器カタログが空です。");
+            var optionalFailed = tiersTask.Result is null || bundlesTask.Result is null || buddiesTask.Result is null || cardsTask.Result is null || spraysTask.Result is null;
+            if (optionalFailed && cached is { } fallback) return fallback with { FromCache = true };
 
             var payload = new CatalogCachePayload(
                 DateTimeOffset.UtcNow,
-                await weaponsTask,
-                await tiersTask,
-                await bundlesTask,
-                await buddiesTask,
-                await cardsTask,
-                await spraysTask);
+                weapons,
+                await tiersTask ?? [],
+                await bundlesTask ?? [],
+                await buddiesTask ?? [],
+                await cardsTask ?? [],
+                await spraysTask ?? []);
             var snapshot = await Task.Run(() => CreateSnapshot(payload, fromCache: false), cancellationToken);
-            await TryWriteCacheAsync(payload, cancellationToken);
+            if (!optionalFailed) await TryWriteCacheAsync(payload, cancellationToken);
             return snapshot;
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException or IOException)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (cached is { } fallback)
@@ -79,13 +83,13 @@ internal sealed class CatalogClient : IDisposable
         return envelope?.Data ?? throw new InvalidDataException($"カタログの形式を読み取れませんでした: {uri.AbsolutePath}");
     }
 
-    private async Task<List<T>> FetchOptionalListAsync<T>(Uri uri, CancellationToken cancellationToken)
+    private async Task<List<T>?> FetchOptionalListAsync<T>(Uri uri, CancellationToken cancellationToken)
     {
         try { return await FetchListAsync<T>(uri, cancellationToken); }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException)
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException or InvalidDataException or IOException)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return [];
+            return null;
         }
     }
 
@@ -103,7 +107,7 @@ internal sealed class CatalogClient : IDisposable
             }, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or NotSupportedException or ArgumentException or NullReferenceException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or NotSupportedException or ArgumentException)
         {
             return null;
         }
@@ -111,18 +115,28 @@ internal sealed class CatalogClient : IDisposable
 
     private async Task TryWriteCacheAsync(CatalogCachePayload payload, CancellationToken cancellationToken)
     {
+        string? tempPath = null;
         try
         {
             var directory = Path.GetDirectoryName(cachePath)!;
             Directory.CreateDirectory(directory);
-            var tempPath = cachePath + ".tmp";
+            tempPath = $"{cachePath}.{Guid.NewGuid():N}.tmp";
             var json = await Task.Run(() => JsonSerializer.Serialize(payload, JsonOptions), cancellationToken);
             await File.WriteAllTextAsync(tempPath, json, cancellationToken);
             File.Move(tempPath, cachePath, overwrite: true);
+            tempPath = null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // A cache write failure should not prevent the online catalog from opening.
+        }
+        finally
+        {
+            if (tempPath is not null)
+            {
+                try { File.Delete(tempPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
         }
     }
 

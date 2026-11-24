@@ -1,6 +1,7 @@
 using ValoAutoPick;
 
 if (!Edition.IsTrial) throw new Exception("Trial compilation was not enabled");
+if (Edition.DisplayName != "SpikeSide 体験版") throw new Exception("Trial branding is incorrect");
 var defaultAgent = Guid.NewGuid().ToString();
 var mapAgent = Guid.NewGuid().ToString();
 var settings = new Settings { AgentId = defaultAgent, MapAgents = new() { ["Ascent"] = mapAgent } };
