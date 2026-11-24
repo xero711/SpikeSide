@@ -9,7 +9,6 @@ namespace ValoAutoPick;
 
 public sealed class StorePreviewControl : UserControl
 {
-    private const string VideoPrepareStatus = "動画を準備しています…";
     private const string SignInStatus = "Riotアカウントへ接続しています…";
     private const string SkinLevelType = "e7c63390-eda7-46e0-bb7a-a6abdacd2433";
     private const string BuddyType = "dd3bf334-87f3-40bd-b043-682a57a8dc3a";
@@ -203,7 +202,6 @@ public sealed class StorePreviewControl : UserControl
             UpdateVideoControls();
             playbackButton.Visible = true;
             muteVideoButton.Visible = true;
-            EndProgress(VideoPrepareStatus);
             SetStatus("", false);
         };
         mediaPlayer.MediaOpened += mediaOpenedHandler;
@@ -326,7 +324,6 @@ public sealed class StorePreviewControl : UserControl
             var cancelledByLifetime = lifetime.IsCancellationRequested;
             PreviewVideoResult = cancelledByLifetime ? "Cancelled" : "TimedOut";
             if (!cancelledByLifetime) ShowPreviewImage();
-            else EndProgress(VideoPrepareStatus);
             return false;
         }
         finally
@@ -1808,7 +1805,6 @@ public sealed class StorePreviewControl : UserControl
         videoLoad?.Cancel();
         var operation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, externalToken);
         videoLoad = operation;
-        SetStatus(VideoPrepareStatus, false);
         videoLoadingOverlay.Loading = true;
         videoLoadingOverlay.LoadingMessage = "動画を取得しています…";
         previewImage.Visible = false;
@@ -1931,8 +1927,6 @@ public sealed class StorePreviewControl : UserControl
         try { mediaPlayer.Stop(); mediaPlayer.Close(); mediaPlayer.Source = null; }
         catch (InvalidOperationException) { }
         RestoreVideoHost();
-        // A cancelled or superseded video never reaches MediaOpened/MediaFailed, so release its wait state here.
-        EndProgress(VideoPrepareStatus);
     }
 
     private void ParkVideoHost()

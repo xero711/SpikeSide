@@ -75,6 +75,7 @@ internal static class Program
                 if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && DwmGetWindowAttribute(form.Handle, 20, out var darkDwm, sizeof(int)) == 0)
                     Assert(darkDwm == 1, "dark theme updates native window appearance");
                 CheckMediaOverlayContrast(applyTheme);
+                await CheckVideoProgressDisplay();
                 var startupType = assembly.GetType("ValoAutoPick.StartupRegistration")!;
                 var setStartup = startupType.GetMethod("SetEnabled", BindingFlags.Static | BindingFlags.NonPublic, [typeof(Microsoft.Win32.RegistryKey), typeof(string), typeof(bool), typeof(string)])!;
                 var isStartup = startupType.GetMethod("IsEnabled", BindingFlags.Static | BindingFlags.NonPublic, [typeof(Microsoft.Win32.RegistryKey), typeof(string)])!;
@@ -355,6 +356,32 @@ internal static class Program
             Assert(hasLightText, $"{theme} theme media overlay has readable light text on dark background");
         }
         window.Controls.Remove(overlay);
+    }
+
+    private static async Task CheckVideoProgressDisplay()
+    {
+        using var api = new RiotApi();
+        using var store = new StorePreviewControl(api);
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var play = (Control)typeof(StorePreviewControl).GetField("playVideoButton", flags)!.GetValue(store)!;
+        var status = (Label)typeof(StorePreviewControl).GetField("statusLabel", flags)!.GetValue(store)!;
+        var overlay = (Control)typeof(StorePreviewControl).GetField("videoLoadingOverlay", flags)!.GetValue(store)!;
+        var cache = typeof(StorePreviewControl).Assembly.GetType("ValoAutoPick.NativeVideoCache")!;
+        var downloads = (SemaphoreSlim)cache.GetField("Downloads", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        using var stop = new CancellationTokenSource();
+        await downloads.WaitAsync();
+        try
+        {
+            typeof(StorePreviewControl).GetMethod("SetStatus", flags)!.Invoke(store, ["", false]);
+            play.Tag = "https://valorant.dyn.riotcdn.net/" + Guid.NewGuid().ToString("N") + ".mp4";
+            var task = (Task<bool>)typeof(StorePreviewControl).GetMethod("PlayPreviewVideoAsync", flags)!.Invoke(store, [stop.Token])!;
+            Assert(!task.IsCompleted, "video download can remain pending during the check");
+            Assert((bool)overlay.GetType().GetProperty("Loading", flags)!.GetValue(overlay)!, "video preview still shows its loading indicator");
+            Assert(status.Text.Length == 0, "video loading does not add a status above the catalog");
+            stop.Cancel();
+            await task;
+        }
+        finally { downloads.Release(); }
     }
 
     private static async Task CheckClosingWaitsForPendingWork()
