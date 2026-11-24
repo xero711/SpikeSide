@@ -875,14 +875,16 @@ public sealed class MatchHistoryControl : UserControl
         var headerBottomGap = UiMetrics.Px(this, UiMetrics.TightGap);
         var listHeader = new TableLayoutPanel
         {
-            Dock = DockStyle.Top, Height = UiMetrics.Px(this, 38) + headerBottomGap, ColumnCount = 3, RowCount = 1,
+            Dock = DockStyle.Top, Height = UiMetrics.Px(this, UiMetrics.ButtonHeight) + headerBottomGap, ColumnCount = 3, RowCount = 1,
             BackColor = Theme.Surface, Margin = Padding.Empty, Padding = new Padding(0, 0, 0, headerBottomGap)
         };
-        listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, favoritesFilter.Width + UiMetrics.Px(this, 10)));
+        listHeader.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, UiMetrics.Px(this, 130)));
+        listHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        listTitle.AutoSize = true;
         listTitle.Dock = DockStyle.Fill; matchCount.Dock = DockStyle.Fill; matchCount.TextAlign = ContentAlignment.MiddleRight;
-        favoritesFilter.Margin = new Padding(UiMetrics.Px(this, UiMetrics.TightGap));
+        favoritesFilter.Margin = new Padding(UiMetrics.Px(this, UiMetrics.TightGap), 0, UiMetrics.Px(this, UiMetrics.TightGap), 0);
         favoritesFilter.Dock = DockStyle.Fill;
         listHeader.Controls.Add(listTitle, 0, 0);
         listHeader.Controls.Add(favoritesFilter, 1, 0);

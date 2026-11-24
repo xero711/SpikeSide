@@ -91,6 +91,8 @@ internal static class Program
                 }
                 finally { Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(testKeyName, false); }
                 await CheckSettingsLifecycle();
+                CheckRegionSelectorBounds();
+                CheckFavoriteFilterSpacing();
                 await CheckClosingWaitsForPendingWork();
                 await CheckAtomicUiUpdates();
                 CheckStoreNavigationSpacing();
@@ -367,6 +369,50 @@ internal static class Program
         pending.SetResult();
         for (var i = 0; i < 40 && !window.IsDisposed; i++) await Task.Delay(25);
         Assert(window.IsDisposed, "window closes after pending work completes");
+    }
+
+    private static void CheckRegionSelectorBounds()
+    {
+        using var window = new MainWindow(skipBackgroundWork: true) { ShowInTaskbar = false };
+        window.Show();
+        var selector = (Control)typeof(MainWindow).GetField("region", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
+        foreach (var size in new[] { window.Size, window.MinimumSize })
+        {
+            window.Size = size;
+            window.PerformLayout();
+            var parent = selector.Parent!;
+            Assert(parent.ClientRectangle.Contains(selector.Bounds), $"region selector fits within its row at {size}");
+            Assert(selector.Height >= TextRenderer.MeasureText("自動（おすすめ）", selector.Font).Height, "region selector has enough height for its text");
+        }
+    }
+
+    private static void CheckFavoriteFilterSpacing()
+    {
+        using var api = new RiotApi();
+        using var window = new TestWindow { ClientSize = new Size(1300, 800), ShowInTaskbar = false };
+        using var history = new MatchHistoryControl(api, Array.Empty<Agent>()) { Dock = DockStyle.Fill };
+        window.Controls.Add(history);
+        window.Show();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var filter = (Control)typeof(MatchHistoryControl).GetField("favoritesFilter", flags)!.GetValue(history)!;
+        var title = (Label)typeof(MatchHistoryControl).GetField("listTitle", flags)!.GetValue(history)!;
+        var count = (Label)typeof(MatchHistoryControl).GetField("matchCount", flags)!.GetValue(history)!;
+        var list = (Control)typeof(MatchHistoryControl).GetField("matchList", flags)!.GetValue(history)!;
+        var content = (Control)typeof(MatchHistoryControl).GetField("historyContent", flags)!.GetValue(history)!;
+        count.Text = "29 試合";
+        content.Visible = true;
+        foreach (var width in new[] { 1300, 950 })
+        {
+            window.ClientSize = new Size(width, 800);
+            window.PerformLayout();
+            var header = filter.Parent!;
+            header.PerformLayout();
+            var bottom = filter.PointToScreen(new Point(0, filter.Height)).Y;
+            var listTop = list.PointToScreen(Point.Empty).Y;
+            Assert(listTop - bottom >= Px(history, 3), $"favorite filter has a gap above the match list at {width}px");
+            Assert(header.ClientRectangle.Contains(filter.Bounds), $"favorite filter fits inside its header at {width}px");
+            Assert(title.Width >= TextRenderer.MeasureText(title.Text, title.Font, Size.Empty, TextFormatFlags.NoPadding).Width, $"match-history heading stays on one line at {width}px");
+        }
     }
 
     private static void CheckMainStoreSpacing()

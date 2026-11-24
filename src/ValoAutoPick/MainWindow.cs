@@ -407,6 +407,7 @@ public sealed class MainWindow : DarkForm
         connection.Controls.Add(SectionTitle("接続設定"), 0, 0);
         accountInfo.Font = SharedFonts.Get("Yu Gothic UI", 9.5f, FontStyle.Bold); connection.Controls.Add(accountInfo, 0, 1);
         var regionRow = new TableLayoutPanel { Dock = DockStyle.Fill, BackColor = Theme.Surface, ColumnCount = 2, RowCount = 1, Margin = Padding.Empty };
+        regionRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         regionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 94)); regionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         regionRow.Controls.Add(FieldLabel("接続地域"), 0, 0); region.Dock = DockStyle.Fill; region.Margin = Padding.Empty; regionRow.Controls.Add(region, 1, 0);
         connection.Controls.Add(regionRow, 0, 2);
