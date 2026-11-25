@@ -600,6 +600,75 @@ public sealed class RiotApi : IGameApi, IQueueApi, ILiveTrackerSource, IDisposab
             }
         return new(matchId, Text(root, "MapID"), Text(root, "ModeID"), players);
     }
+    // Party groups among the players of the current match, keyed by player. Sources are the local player's own party
+    // (party API) and the party ID in presences the Riot client already shares with this user (friends). A group is
+    // only reported when at least two of its members are in the match.
+    public async Task<IReadOnlyDictionary<string, string>> GetLivePartyGroups(IReadOnlyCollection<string> roster, CancellationToken ct)
+    {
+        var current = CurrentSession;
+        string ownParty = "";
+        var ownMembers = new List<string>();
+        try
+        {
+            using var player = await Request(HttpMethod.Get, $"/parties/v1/players/{current.Subject}", true, ct, sessionSnapshot: current, invalidateOnForbidden: false);
+            var partyId = player is null ? "" : Text(player.RootElement, "CurrentPartyID");
+            if (Guid.TryParse(partyId, out _))
+            {
+                using var party = await Request(HttpMethod.Get, $"/parties/v1/parties/{partyId}", true, ct, sessionSnapshot: current, invalidateOnForbidden: false);
+                if (party is not null && party.RootElement.ValueKind == JsonValueKind.Object &&
+                    string.Equals(Text(party.RootElement, "ID"), partyId, StringComparison.OrdinalIgnoreCase))
+                {
+                    ownParty = partyId;
+                    if (party.RootElement.TryGetProperty("Members", out var members) && members.ValueKind == JsonValueKind.Array)
+                        foreach (var member in members.EnumerateArray())
+                            if (Guid.TryParse(Text(member, "Subject"), out _)) ownMembers.Add(Text(member, "Subject"));
+                }
+            }
+        }
+        catch (ApiException e) when (e.Status is 403 or 404) { }
+
+        JsonDocument? presences = null;
+        try
+        {
+            var connection = await GetLocalEventConnection(current.Subject, ct);
+            if (connection is not null) presences = await LocalGet(connection.Value.Port, connection.Value.Password, "/chat/v4/presences", ct);
+            if (!string.Equals(CurrentSession.Subject, current.Subject, StringComparison.OrdinalIgnoreCase)) return new Dictionary<string, string>();
+            return ParsePartyGroups(presences?.RootElement ?? default, roster, current.Subject, ownParty, ownMembers);
+        }
+        finally { presences?.Dispose(); }
+    }
+
+    internal static IReadOnlyDictionary<string, string> ParsePartyGroups(JsonElement presencesRoot, IReadOnlyCollection<string> roster,
+        string self, string ownParty, IReadOnlyCollection<string> ownMembers)
+    {
+        var inMatch = roster.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var partyOf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (presencesRoot.ValueKind == JsonValueKind.Object && presencesRoot.TryGetProperty("presences", out var presences) && presences.ValueKind == JsonValueKind.Array)
+            foreach (var presence in presences.EnumerateArray())
+            {
+                if (presence.ValueKind != JsonValueKind.Object || !Text(presence, "product").Equals("valorant", StringComparison.OrdinalIgnoreCase)) continue;
+                var subject = Text(presence, "puuid");
+                var encoded = Text(presence, "private");
+                if (!inMatch.Contains(subject) || encoded.Length == 0 || encoded.Length > 65536) continue;
+                try
+                {
+                    using var data = JsonDocument.Parse(Convert.FromBase64String(encoded));
+                    var p = data.RootElement;
+                    if (p.ValueKind != JsonValueKind.Object) continue;
+                    var party = p.TryGetProperty("partyPresenceData", out var pt) && pt.ValueKind == JsonValueKind.Object ? pt : default;
+                    var partyId = FirstNonEmpty(Text(party, "partyId"), Text(p, "partyId"));
+                    if (Guid.TryParse(partyId, out _)) partyOf[subject] = partyId.ToLowerInvariant();
+                }
+                catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException) { }
+            }
+        // The party API is authoritative for the local player's own party.
+        if (Guid.TryParse(ownParty, out _))
+            foreach (var member in ownMembers.Append(self))
+                if (inMatch.Contains(member)) partyOf[member] = ownParty.ToLowerInvariant();
+        var groups = partyOf.GroupBy(pair => pair.Value).Where(group => group.Count() >= 2).SelectMany(group => group).ToArray();
+        return groups.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
     public async Task<string?> GetPartyState(CancellationToken ct)
     {
         var current = CurrentSession;

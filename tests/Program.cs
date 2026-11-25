@@ -499,6 +499,63 @@ tests.Add(("Overwolf scoreboard only applies validated current match and partici
     state.ClearScores(); Equal("", LiveMatchState.Text(state.Players["0"], "kills"));
     return Task.CompletedTask;
 }));
+tests.Add(("final match results replace the live roster values only for the same match", () => {
+    const string match = "22222222-2222-2222-2222-222222222222", self = "11111111-1111-1111-1111-111111111111", enemy = "33333333-3333-3333-3333-333333333333";
+    var json = $$$"""
+    {"matchInfo":{"matchId":"{{{match}}}","queueID":"competitive"},
+     "players":[{"subject":"{{{self}}}","teamId":"Blue","stats":{"score":4800,"kills":21,"deaths":12,"assists":5,"roundsPlayed":20}},
+                {"subject":"{{{enemy}}}","teamId":"Red","stats":{"score":3000,"kills":10,"deaths":18,"assists":2,"roundsPlayed":20}}],
+     "teams":[{"teamId":"Blue","won":true,"roundsWon":13,"roundsPlayed":20},{"teamId":"Red","won":false,"roundsWon":7,"roundsPlayed":20}],
+     "roundResults":[]}
+    """;
+    var analysis = MatchAnalyticsEngine.Analyze(MatchDetailsParser.Parse(json).Match ?? throw new Exception("Match did not parse"));
+    var state = new LiveMatchState();
+    state.ReplaceRoster(new LiveRosterMatch(match, "Ascent", "", [new LiveRosterPlayer(self, "Blue", "", false, false, null), new LiveRosterPlayer(enemy, "Red", "", false, false, null)]), self, "self", []);
+    state.ApplyScores(new Dictionary<string, LiveScore>(StringComparer.OrdinalIgnoreCase) { [self] = new LiveScore(3, 1, 0) { Money = 900 } });
+    state.MarkEnded();
+    Equal(true, state.MatchEnded); Equal("game", state.Values["stage"]);
+    Equal(true, state.ApplyFinalStats(analysis, self));
+    var me = state.Players.Values.First(p => LiveMatchState.Text(p, "player_id") == self);
+    Equal("21", LiveMatchState.Text(me, "kills")); Equal("12", LiveMatchState.Text(me, "deaths")); Equal("5", LiveMatchState.Text(me, "assists"));
+    Equal("240", LiveMatchState.Text(me, "acs")); Equal("", LiveMatchState.Text(me, "money"));
+    Equal("final", state.Values["stage"]); Equal("victory", state.Values["match_outcome"]);
+    Equal("""{"won":13,"lost":7}""", state.Values["score"]);
+    // Results of a different match never apply to the roster on screen.
+    var other = new LiveMatchState();
+    other.ReplaceRoster(new LiveRosterMatch("44444444-4444-4444-4444-444444444444", "Ascent", "", [new LiveRosterPlayer(self, "Blue", "", false, false, null)]), self, "self", []);
+    Equal(false, other.ApplyFinalStats(analysis, self)); Equal("game", other.Values["stage"]);
+    return Task.CompletedTask;
+}));
+tests.Add(("live party groups come from the own party and shared presences, and need two members in the match", () => {
+    const string self = "11111111-1111-1111-1111-111111111111", mate = "22222222-2222-2222-2222-222222222222", friend = "33333333-3333-3333-3333-333333333333",
+        friendMate = "44444444-4444-4444-4444-444444444444", solo = "55555555-5555-5555-5555-555555555555", outsider = "66666666-6666-6666-6666-666666666666";
+    const string ownParty = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", friendParty = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", soloParty = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    string Private(object value) => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(value)));
+    var presences = System.Text.Json.JsonSerializer.Serialize(new { presences = new object[] {
+        new { puuid = friend, product = "valorant", @private = Private(new { partyPresenceData = new { partyId = friendParty } }) },
+        new { puuid = friendMate, product = "valorant", @private = Private(new { partyId = friendParty }) },
+        new { puuid = solo, product = "valorant", @private = Private(new { partyPresenceData = new { partyId = soloParty } }) },
+        new { puuid = outsider, product = "valorant", @private = Private(new { partyPresenceData = new { partyId = soloParty } }) },
+        new { puuid = mate, product = "league_of_legends", @private = Private(new { partyId = friendParty }) },
+        new { puuid = friendMate, product = "valorant", @private = "not base64" }
+    } });
+    using var document = System.Text.Json.JsonDocument.Parse(presences);
+    var roster = new[] { self, mate, friend, friendMate, solo };
+    var groups = RiotApi.ParsePartyGroups(document.RootElement, roster, self, ownParty, [self, mate]);
+    Equal(4, groups.Count);
+    Equal(groups[self], groups[mate]); Equal(groups[friend], groups[friendMate]);
+    Equal(false, groups[self] == groups[friend]);
+    // A party with only one member in this match (the other is not playing here) is not a group.
+    Equal(false, groups.ContainsKey(solo));
+    Equal(0, RiotApi.ParsePartyGroups(default, roster, self, "", []).Count);
+    var state = new LiveMatchState();
+    state.ReplaceRoster(new LiveRosterMatch("m", "Ascent", "", [new LiveRosterPlayer(self, "Blue", "", false, false, null), new LiveRosterPlayer(solo, "Red", "", false, false, null)]), self, "self", []);
+    state.ApplyParties(groups);
+    Equal(ownParty, state.Players.Values.Select(p => LiveMatchState.Text(p, "party")).First(text => text.Length > 0));
+    state.ApplyParties(new Dictionary<string, string>());
+    Equal(true, state.Players.Values.All(p => LiveMatchState.Text(p, "party").Length == 0));
+    return Task.CompletedTask;
+}));
 tests.Add(("Overwolf scoreboard falls back to Riot ID and local flag and keeps live extras", () => {
     const string match = "22222222-2222-2222-2222-222222222222", self = "11111111-1111-1111-1111-111111111111", ally = "44444444-4444-4444-4444-444444444444";
     // GEP's player_id is not guaranteed to be Riot's PUUID: these entries can only be matched by name or by is_local.

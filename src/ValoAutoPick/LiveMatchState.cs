@@ -39,6 +39,55 @@ internal sealed class LiveMatchState
         }
     }
 
+    // Final results from match-details for the match on screen. Only applies when the IDs match, keeps the roster,
+    // and switches the stage to "final" so live Overwolf snapshots no longer apply to it.
+    public bool ApplyFinalStats(MatchAnalytics analytics, string self)
+    {
+        if (!values.TryGetValue("match_id", out var matchId) || !analytics.Info.MatchId.Equals(matchId, StringComparison.OrdinalIgnoreCase)) return false;
+        var applied = false;
+        foreach (var player in players.Values)
+        {
+            if (analytics.FindPlayer(Text(player, "player_id")) is not { } stats) continue;
+            foreach (var key in LiveScoreKeys) player.Remove(key);
+            if (stats.Kills is int k) player["kills"] = k;
+            if (stats.Deaths is int d) player["deaths"] = d;
+            if (stats.Assists is int a) player["assists"] = a;
+            if (stats.AverageCombatScore is double acs) player["acs"] = Math.Round(acs);
+            if (stats.AverageDamagePerRound is double adr) player["adr"] = Math.Round(adr, 1);
+            if (stats.HeadshotPercent is double hs) player["hs_percent"] = Math.Round(hs, 1);
+            if (stats.FirstKills is int fk) player["first_kills"] = fk;
+            if (stats.FirstDeaths is int fd) player["first_deaths"] = fd;
+            if (stats.DamageDealt is int damage) player["damage"] = damage;
+            applied = true;
+        }
+        if (!applied) return false;
+        var own = analytics.FindPlayer(self)?.TeamId ?? "";
+        var team = analytics.Teams.FirstOrDefault(t => t.TeamId.Equals(own, StringComparison.OrdinalIgnoreCase));
+        if (team?.RoundsWon is int won && team.RoundsLost is int lost) SetScore(won, lost);
+        values["match_outcome"] = team?.Outcome switch { MatchOutcome.Win => "victory", MatchOutcome.Loss => "defeat", MatchOutcome.Draw => "draw", _ => "" };
+        values["stage"] = "final";
+        values.Remove("round_phase"); values.Remove("round_number");
+        MatchEnded = true;
+        return true;
+    }
+
+    // The match on screen has ended and its final results are being fetched.
+    public void MarkEnded()
+    {
+        MatchEnded = true;
+        values.Remove("round_phase");
+    }
+
+    // Party ID for players who share a party with someone else in this match; removed for everyone else.
+    public void ApplyParties(IReadOnlyDictionary<string, string> parties)
+    {
+        foreach (var player in players.Values)
+        {
+            if (parties.TryGetValue(Text(player, "player_id"), out var party) && party.Length > 0) player["party"] = party;
+            else player.Remove("party");
+        }
+    }
+
     public void ApplyScores(IReadOnlyDictionary<string, LiveScore> scores)
     {
         foreach (var player in players.Values)
@@ -56,7 +105,8 @@ internal sealed class LiveMatchState
         }
     }
 
-    private static readonly string[] LiveScoreKeys = ["kills", "deaths", "assists", "money", "ult_points", "ult_max", "alive", "shield", "weapon", "spike", "headshots"];
+    private static readonly string[] LiveScoreKeys = ["kills", "deaths", "assists", "money", "ult_points", "ult_max", "alive", "shield", "weapon", "spike", "headshots",
+        "acs", "adr", "hs_percent", "first_kills", "first_deaths", "damage"];
 
     public void ClearScores()
     {

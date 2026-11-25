@@ -39,6 +39,20 @@ internal sealed class LiveMatchControl : UserControl
     private DateTimeOffset? lastScoreUpdate;
     // When the Overwolf companion last delivered anything, matched or not; separates "not running" from "not matched".
     private DateTimeOffset? lastBridgeMessage;
+    // Party ID per player (only groups of two or more in this match) and a stable letter index per party.
+    private readonly Dictionary<string, string> playerParties = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> partyIndexes = new(StringComparer.OrdinalIgnoreCase);
+    private bool resolvingParties;
+    private DateTimeOffset nextPartyLookup;
+    // The match that just ended stays on screen until its final results arrive and the next match starts.
+    private string endedMatchId = "";
+    private DateTimeOffset endedAt;
+    private DateTimeOffset nextFinalAttempt;
+    private bool resolvingFinal, finalApplied, finalGaveUp;
+    private MatchAnalytics? finalResults;
+    private static readonly TimeSpan FinalRetryInterval = TimeSpan.FromSeconds(10);
+    // Riot usually publishes match details within a minute; stop asking after this long.
+    private static readonly TimeSpan FinalGiveUpAfter = TimeSpan.FromMinutes(5);
 
     public LiveMatchControl() : this(null, []) { }
     public LiveMatchControl(RiotApi? api, IReadOnlyList<Agent> agents)
@@ -95,6 +109,7 @@ internal sealed class LiveMatchControl : UserControl
     {
         sessionGeneration++;
         state.Reset();
+        ClearEndedMatch();
         ResetNames();
         selectedSlot = null;
         lastSuccess = null;
@@ -115,6 +130,7 @@ internal sealed class LiveMatchControl : UserControl
         }
         sessionGeneration++;
         state.Reset();
+        ClearEndedMatch();
         ResetNames();
         selectedSlot = null;
         lastSuccess = null;
@@ -158,9 +174,14 @@ internal sealed class LiveMatchControl : UserControl
                 return;
             }
             connected = true;
-            if (match is null && pregame is null)
+            if (match is null && pregame is null && HoldEndedMatch())
+            {
+                StartFinalLookup(subject);
+            }
+            else if (match is null && pregame is null)
             {
                 state.Reset();
+                ClearEndedMatch();
                 ResetNames();
                 selectedSlot = null;
                 connection.Text = "ピック画面・試合を待機中";
@@ -189,10 +210,12 @@ internal sealed class LiveMatchControl : UserControl
                     ResetNames();
                     nameMatchId = currentMatchId;
                 }
+                ClearEndedMatch();
                 if (match is not null) state.ReplaceRoster(match, subject, api.AccountName, agents);
                 else state.ReplacePregame(pregame!, subject, api.AccountName, agents);
                 state.ApplyNames(playerNames);
                 state.ApplyRanks(playerRanks);
+                state.ApplyParties(playerParties);
                 if (match is not null) state.ApplyScores(liveScores);
                 if (!string.Equals(previousMatchId, currentMatchId, StringComparison.OrdinalIgnoreCase))
                 {
@@ -209,6 +232,7 @@ internal sealed class LiveMatchControl : UserControl
                     : "味方のピック · 約5秒ごとに更新";
                 StartNameLookup(subject);
                 StartRankLookup(subject);
+                StartPartyLookup(subject);
             }
             lastSuccess = DateTimeOffset.UtcNow;
             dirty = true;
@@ -236,6 +260,9 @@ internal sealed class LiveMatchControl : UserControl
         liveScores.Clear();
         lastScoreUpdate = null;
         lastBridgeMessage = null;
+        playerParties.Clear();
+        partyIndexes.Clear();
+        nextPartyLookup = DateTimeOffset.MinValue;
         nextNameRetry = DateTimeOffset.MinValue;
         nextRankRetry = DateTimeOffset.MinValue;
     }
@@ -270,6 +297,8 @@ internal sealed class LiveMatchControl : UserControl
     {
         if (lastScoreUpdate is not { } updated || DateTimeOffset.UtcNow - updated < TimeSpan.FromSeconds(15)) return false;
         liveScores.Clear(); lastScoreUpdate = null; state.ClearScores();
+        // Final results replace live values; expiring the live ones must not remove them.
+        if (finalApplied && finalResults is not null && api is not null) state.ApplyFinalStats(finalResults, api.Subject);
         return true;
     }
 
@@ -314,6 +343,100 @@ internal sealed class LiveMatchControl : UserControl
         }
         finally { resolvingNames = false; }
     }
+
+    // True when the roster on screen is a match that has just ended (or already shows its final results) and should
+    // stay visible instead of being cleared while no new match has started.
+    private bool HoldEndedMatch()
+    {
+        if (!state.Values.TryGetValue("match_id", out var matchId) || !Guid.TryParse(matchId, out _) || state.Players.Count == 0) return false;
+        var stage = state.Values.TryGetValue("stage", out var s) ? s : "";
+        if (stage == "game" && endedMatchId.Length == 0)
+        {
+            endedMatchId = matchId; endedAt = DateTimeOffset.UtcNow; nextFinalAttempt = DateTimeOffset.UtcNow.AddSeconds(3);
+            finalApplied = false; finalGaveUp = false; finalResults = null;
+            state.MarkEnded();
+            dirty = true;
+        }
+        if (!endedMatchId.Equals(matchId, StringComparison.OrdinalIgnoreCase)) return false;
+        connection.Text = finalApplied ? "試合終了 · 最終結果を表示中" : finalGaveUp ? "試合終了 · 結果を取得できませんでした" : "試合終了 · 結果を取得中";
+        return true;
+    }
+
+    private void ClearEndedMatch()
+    {
+        endedMatchId = ""; finalApplied = false; finalGaveUp = false; finalResults = null;
+    }
+
+    private void StartFinalLookup(string subject)
+    {
+        if (api is null || resolvingFinal || finalApplied || finalGaveUp || DateTimeOffset.UtcNow < nextFinalAttempt) return;
+        if (DateTimeOffset.UtcNow - endedAt > FinalGiveUpAfter) { finalGaveUp = true; dirty = true; return; }
+        _ = ResolveFinalAsync(endedMatchId, subject, sessionGeneration);
+    }
+
+    private async Task ResolveFinalAsync(string matchId, string subject, int generation)
+    {
+        if (api is null) return;
+        resolvingFinal = true;
+        nextFinalAttempt = DateTimeOffset.UtcNow + FinalRetryInterval;
+        try
+        {
+            using var document = await api.GetMatchDetails(matchId, lifetime.Token);
+            if (document is null) return; // Not published yet; try again on a later poll.
+            var root = document.RootElement.Clone();
+            var parsed = await Task.Run(() => MatchDetailsParser.Parse(root), lifetime.Token);
+            if (IsDisposed || Disposing || generation != sessionGeneration || !api.HasAccountSession ||
+                !string.Equals(subject, api.Subject, StringComparison.OrdinalIgnoreCase) || !endedMatchId.Equals(matchId, StringComparison.OrdinalIgnoreCase)) return;
+            if (parsed.Match is not { } details || !details.Info.MatchId.Equals(matchId, StringComparison.OrdinalIgnoreCase)) return;
+            var analytics = MatchAnalyticsEngine.Analyze(details);
+            if (!state.ApplyFinalStats(analytics, subject)) return;
+            finalResults = analytics; finalApplied = true;
+            connection.Text = "試合終了 · 最終結果を表示中";
+            dirty = true;
+        }
+        catch (ApiException e) when (e.Status == 429) { nextFinalAttempt = DateTimeOffset.UtcNow.AddSeconds(Math.Max(10, e.RetrySeconds)); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception e) when (e is ApiException or HttpRequestException or IOException or InvalidOperationException or JsonException or TaskCanceledException or ClientUnavailableException) { }
+        finally { resolvingFinal = false; }
+    }
+
+    // Parties rarely change during a match, so they are looked up every 30 s rather than on every 5 s poll.
+    private void StartPartyLookup(string subject)
+    {
+        if (api is null || resolvingParties || DateTimeOffset.UtcNow < nextPartyLookup) return;
+        var roster = state.Players.Values.Select(player => LiveMatchState.Text(player, "player_id"))
+            .Where(id => Guid.TryParse(id, out _)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (roster.Length < 2) return;
+        _ = ResolvePartiesAsync(roster, subject, nameGeneration);
+    }
+
+    private async Task ResolvePartiesAsync(string[] roster, string subject, int generation)
+    {
+        if (api is null) return;
+        resolvingParties = true;
+        nextPartyLookup = DateTimeOffset.UtcNow.AddSeconds(30);
+        try
+        {
+            var groups = await api.GetLivePartyGroups(roster, lifetime.Token);
+            if (generation != nameGeneration || IsDisposed || Disposing || !api.HasAccountSession ||
+                !string.Equals(subject, api.Subject, StringComparison.OrdinalIgnoreCase)) return;
+            playerParties.Clear();
+            foreach (var pair in groups) playerParties[pair.Key] = pair.Value;
+            // The local player's party takes the first letter; others follow in the order they were first seen.
+            var ordered = groups.OrderByDescending(pair => pair.Key.Equals(subject, StringComparison.OrdinalIgnoreCase)).Select(pair => pair.Value).Distinct(StringComparer.OrdinalIgnoreCase);
+            foreach (var party in ordered)
+                if (!partyIndexes.ContainsKey(party)) partyIndexes[party] = partyIndexes.Count;
+            state.ApplyParties(playerParties);
+            dirty = true;
+        }
+        catch (ApiException e) when (e.Status == 429) { if (generation == nameGeneration) nextPartyLookup = DateTimeOffset.UtcNow.AddSeconds(Math.Max(30, e.RetrySeconds)); }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
+        catch (Exception e) when (e is ApiException or HttpRequestException or IOException or InvalidOperationException or JsonException or TaskCanceledException or ClientUnavailableException) { }
+        finally { resolvingParties = false; }
+    }
+
+    private int? PartyIndex(System.Text.Json.Nodes.JsonObject player) =>
+        partyIndexes.TryGetValue(LiveMatchState.Text(player, "party"), out var index) ? index : null;
 
     private void StartRankLookup(string subject)
     {
@@ -406,7 +529,12 @@ internal sealed class LiveMatchControl : UserControl
         if (score != "—" && !holding) parts.Add(score);
         if (Field("round_number") is { } round && round != "—") parts.Add("ラウンド " + round);
         if (phase.Length > 0) parts.Add(phase);
-        if (Field("stage") == "game") parts.Add(LiveDataStatus());
+        if (Field("stage") == "final")
+        {
+            var outcome = Field("match_outcome") switch { "victory" => "勝利", "defeat" => "敗北", "draw" => "引き分け", _ => "" };
+            parts.Insert(1, outcome.Length > 0 ? $"最終結果 · {outcome}" : "最終結果");
+        }
+        else if (Field("stage") == "game") parts.Add(state.MatchEnded ? "結果を取得中" : LiveDataStatus());
         summary.Text = string.Join("    ", parts);
         emptyRoster.Text = !connected && state.Players.Count == 0
             ? "接続を確認中\n\nRiot に接続すると、試合情報を表示します。"
@@ -438,12 +566,12 @@ internal sealed class LiveMatchControl : UserControl
             int? tier = int.TryParse(LiveMatchState.Text(p, "rank_tier"), out var t) ? t : null;
             var status = isPregame ? V("selection") : LiveStatus(p) ?? side switch { LiveRosterSide.Ally => "味方", LiveRosterSide.Enemy => "相手", _ => "不明" };
             rows.Add(new LiveRosterRow(pair.Key, side, V("name"), agentName, AgentId(p, agentName), tier, V("rank"), kda, status,
-                LiveMatchState.Text(p, "is_local") == "true", isPregame && V("selection") != "確定"));
+                LiveMatchState.Text(p, "is_local") == "true", isPregame && V("selection") != "確定", PartyIndex(p)));
         }
         var allies = rows.Count(r => r.Side == LiveRosterSide.Ally);
         var enemies = rows.Count(r => r.Side == LiveRosterSide.Enemy);
         var freeForAll = !isPregame && (ModeName(state.Values.TryGetValue("game_mode", out var mode) ? mode : "") == "デスマッチ" ||
-            stage == "game" && Math.Max(allies, enemies) > 5 && Math.Min(allies, enemies) <= 1);
+            stage is "game" or "final" && Math.Max(allies, enemies) > 5 && Math.Min(allies, enemies) <= 1);
         arrangement = isPregame ? LiveRosterLayout.Pregame : freeForAll ? LiveRosterLayout.FreeForAll : LiveRosterLayout.Teams;
         if (freeForAll) rows = rows.Select(r => r.Status is "味方" or "相手" or "不明" ? r with { Status = r.IsLocal ? "自分" : "相手" } : r).ToList();
         return rows;
@@ -473,7 +601,10 @@ internal sealed class LiveMatchControl : UserControl
         var isPregame = state.Values.TryGetValue("stage", out var stage) && stage == "pregame";
         var rank = V("rank") == "—" ? "取得中 / データなし" : V("rank") + (V("rank_rr") == "—" ? "" : $" · {V("rank_rr")} RR");
         var team = V("teammate") switch { "true" => "味方", "false" => "相手", _ => "不明" };
-        details.Text = $"{V("name")}\n\nエージェント   {AgentDisplayName(p)}\n\n直近コンペ後   {rank}" +
+        var party = PartyIndex(p) is int partyIndex
+            ? $"\n\nパーティ   {LiveRosterView.PartyLabel(partyIndex)}（{state.Players.Values.Count(other => LiveMatchState.Text(other, "party") == LiveMatchState.Text(p, "party"))}人）"
+            : "";
+        details.Text = $"{V("name")}\n\nエージェント   {AgentDisplayName(p)}{party}\n\n直近コンペ後   {rank}" +
             (isPregame ? $"\n\n選択状況   {V("selection")}" : $"\n\nチーム   {team}" + (level == "—" ? "" : $"\n\nアカウントレベル   {level}")) +
             (isPregame ? "\n\nピック中は味方を表示します。" : V("kills") == "—" ? "\n\nK/D/A: Overwolf イベントを待機中" : LiveDetails(p));
     }
@@ -481,6 +612,7 @@ internal sealed class LiveMatchControl : UserControl
     // Shown in the status column during a match when Overwolf sends it: a downed player first, then a ready ultimate.
     private static string? LiveStatus(System.Text.Json.Nodes.JsonObject p)
     {
+        if (LiveMatchState.Text(p, "acs") is { Length: > 0 } acs) return $"ACS {acs}";
         if (LiveMatchState.Text(p, "alive") == "false") return "ダウン";
         if (int.TryParse(LiveMatchState.Text(p, "ult_points"), out var points) && int.TryParse(LiveMatchState.Text(p, "ult_max"), out var max) && max > 0 && points >= max)
             return "ULT 準備完了";
@@ -493,6 +625,12 @@ internal sealed class LiveMatchControl : UserControl
         var lines = new List<string> { $"K / D / A   {T("kills")} / {T("deaths")} / {T("assists")}" };
         if (int.TryParse(T("kills"), out var k) && int.TryParse(T("deaths"), out var d))
             lines.Add($"K/D   {(d == 0 ? k : k / (double)d):0.00}");
+        if (T("acs").Length > 0) lines.Add($"ACS   {T("acs")}");
+        if (T("adr").Length > 0) lines.Add($"ADR   {T("adr")}");
+        if (T("hs_percent").Length > 0) lines.Add($"ヘッドショット率   {T("hs_percent")}%");
+        if (T("damage").Length > 0) lines.Add($"与ダメージ   {T("damage")}");
+        if (T("first_kills").Length > 0 || T("first_deaths").Length > 0)
+            lines.Add($"ファーストキル / デス   {(T("first_kills").Length > 0 ? T("first_kills") : "—")} / {(T("first_deaths").Length > 0 ? T("first_deaths") : "—")}");
         if (int.TryParse(T("headshots"), out var hs)) lines.Add($"ヘッドショットキル   {hs}");
         if (int.TryParse(T("money"), out var money)) lines.Add($"クレジット   {money:N0}");
         if (T("ult_points").Length > 0 && T("ult_max").Length > 0) lines.Add($"アルティメット   {T("ult_points")} / {T("ult_max")}");
@@ -574,6 +712,11 @@ internal sealed class LiveMatchControl : UserControl
         var names = ids.Select((id, i) => (id, name: ($"Player {i + 1}", "JP")))
             .ToDictionary(item => item.id, item => item.name, StringComparer.OrdinalIgnoreCase);
         state.ApplyNames(names);
+        playerParties.Clear(); partyIndexes.Clear();
+        foreach (var (id, party) in new[] { (ids[0], "own"), (ids[1], "own"), (ids[3], "ally2"), (ids[4], "ally2"), (ids[6], "enemy"), (ids[7], "enemy"), (ids[8], "enemy") })
+            if (!pregame || Array.IndexOf(ids, id) < 5) playerParties[id] = party;
+        foreach (var party in new[] { "own", "ally2", "enemy" }) partyIndexes[party] = partyIndexes.Count;
+        state.ApplyParties(playerParties);
         state.ApplyRanks(ids.Select((id, i) => (id, rank: new LiveRecentRank(15 + i % 10, 40 + i)))
             .ToDictionary(item => item.id, item => item.rank, StringComparer.OrdinalIgnoreCase));
         if (!pregame)
@@ -603,7 +746,7 @@ internal enum LiveRosterSide { Ally, Enemy, Unknown }
 internal enum LiveRosterLayout { Teams, Pregame, FreeForAll }
 
 internal sealed record LiveRosterRow(string Slot, LiveRosterSide Side, string Name, string Agent, string AgentId, int? RankTier,
-    string Rank, string Kda, string Status, bool IsLocal, bool Tentative);
+    string Rank, string Kda, string Status, bool IsLocal, bool Tentative, int? Party = null);
 
 // Allies fill the top half and opponents the bottom half; each half is sized for five rows so a full team fills it.
 // During agent select the bottom half only says that opponents are not available yet: no placeholder players are drawn.
@@ -786,7 +929,21 @@ internal sealed class LiveRosterView : ScrollableControl
     internal static string Describe(LiveRosterRow row)
     {
         var side = row.Side switch { LiveRosterSide.Ally => "味方", LiveRosterSide.Enemy => "相手", _ => "チーム不明" };
-        return $"{side}、{row.Name}{(row.IsLocal ? "（自分）" : "")}、{row.Agent}、ランク {row.Rank}、K/D/A {row.Kda}、{row.Status}";
+        var party = row.Party is int index ? $"、パーティ {PartyLabel(index)}" : "";
+        return $"{side}、{row.Name}{(row.IsLocal ? "（自分）" : "")}{party}、{row.Agent}、ランク {row.Rank}、K/D/A {row.Kda}、{row.Status}";
+    }
+
+    // Parties are told apart by a letter as well as a color, so the grouping never depends on color alone.
+    internal static string PartyLabel(int index) => index < 26 ? ((char)('A' + index)).ToString() : (index + 1).ToString();
+
+    // Fixed order, kept clear of the ally blue and opponent red used for teams. Past the palette, colors repeat
+    // but the letter still differs.
+    internal static Color PartyColor(int index)
+    {
+        Color[] light = [Color.FromArgb(98, 80, 214), Color.FromArgb(150, 100, 0), Color.FromArgb(0, 120, 90), Color.FromArgb(180, 50, 110), Color.FromArgb(90, 100, 115)];
+        Color[] dark = [Color.FromArgb(164, 150, 255), Color.FromArgb(240, 190, 60), Color.FromArgb(60, 210, 170), Color.FromArgb(240, 120, 180), Color.FromArgb(190, 200, 212)];
+        var palette = Theme.IsLight ? light : dark;
+        return palette[index % palette.Length];
     }
 
     private static Color SideColor(LiveRosterSide side) => side switch
@@ -913,6 +1070,23 @@ internal sealed class LiveRosterView : ScrollableControl
         var nameHeight = LineHeight(nameFont);
         var subHeight = LineHeight(subFont);
         var subText = row.Agent + (row.IsLocal ? " · 自分" : "");
+        // Party tag: a filled pill in the party's color with its letter, placed before the name.
+        if (row.Party is int party && columns.Name.Width > Px(60))
+        {
+            var label = "PT " + PartyLabel(party);
+            var tagFont = NativePageStyle.SmallBold;
+            var tagHeight = Math.Min(LineHeight(tagFont) + Px(4), bounds.Height - Px(8));
+            var tagWidth = TextRenderer.MeasureText(g, label, tagFont, Size.Empty, TextFormatFlags.NoPadding).Width + Px(12);
+            var tag = new Rectangle(columns.Name.X, bounds.Y + (bounds.Height - tagHeight) / 2, tagWidth, tagHeight);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var path = ThemedButton.Rounded(tag, Math.Max(2, tagHeight / 2)))
+            using (var brush = new SolidBrush(PartyColor(party)))
+                g.FillPath(brush, path);
+            g.SmoothingMode = smoothing;
+            TextRenderer.DrawText(g, label, tagFont, tag, Theme.Background,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+            columns = columns with { Name = Rectangle.FromLTRB(tag.Right + Px(8), columns.Name.Y, columns.Name.Right, columns.Name.Bottom) };
+        }
         if (nameHeight + subHeight + Px(2) <= bounds.Height - Px(8))
         {
             var top = bounds.Y + (bounds.Height - nameHeight - subHeight - Px(2)) / 2;
