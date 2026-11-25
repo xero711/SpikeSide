@@ -20,7 +20,7 @@ public sealed class MatchHistoryControl : UserControl
     private readonly Panel matchList = new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
     private readonly Panel matchRows = new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
     private readonly Dictionary<MatchAnalytics, Control> visibleMatchRows = new(ReferenceEqualityComparer.Instance);
-    private readonly TableLayoutPanel scoreboard = new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty, CellBorderStyle = TableLayoutPanelCellBorderStyle.None, AutoScroll = true };
+    private readonly TableLayoutPanel scoreboard = new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty, CellBorderStyle = TableLayoutPanelCellBorderStyle.None, AutoScroll = false };
     private readonly FlowLayoutPanel rounds = new() { Dock = DockStyle.Fill, AutoScroll = false, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, BackColor = Theme.Surface, Margin = Padding.Empty };
     private readonly FlowLayoutPanel mapRows = new() { Dock = DockStyle.Fill, AutoScroll = false, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = Theme.Surface, Margin = Padding.Empty };
     private readonly FlowLayoutPanel agentRows = new() { Dock = DockStyle.Fill, AutoScroll = false, FlowDirection = FlowDirection.TopDown, WrapContents = false, BackColor = Theme.Surface, Margin = Padding.Empty };
@@ -2134,11 +2134,14 @@ public sealed class MatchHistoryControl : UserControl
         {
             if (replaceRows) BuildScoreboardRows(match, lineMode);
 
-            var rowMinimum = lineMode == 2 ? twoLineMinimum : oneLineMinimum;
-            var rowHeight = Math.Max(rowMinimum, naturalRowHeight);
+            // Rows always share the visible height exactly. Forcing a minimum row height here made ten-player
+            // modes overflow on scaled displays, which showed a vertical scrollbar and, because that scrollbar
+            // narrows the client area, a horizontal one as well. Compact mode (lineMode 0) lays the cell out
+            // for whatever height it gets, so fitting is preferable to scrolling.
             scoreboard.RowStyles[0].Height = headerHeight;
+            var remainder = availableRowsHeight - naturalRowHeight * playerCount;
             for (var i = 1; i < scoreboard.RowStyles.Count; i++)
-                scoreboard.RowStyles[i].Height = rowHeight;
+                scoreboard.RowStyles[i].Height = naturalRowHeight + (i <= remainder ? 1 : 0);
         }
         finally { scoreboard.ResumeLayout(); }
         UpdateScoreboardColumnWidths();
