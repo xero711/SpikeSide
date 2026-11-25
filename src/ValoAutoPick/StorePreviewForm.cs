@@ -93,7 +93,8 @@ public sealed class StorePreviewControl : UserControl
     private readonly System.Windows.Forms.Timer videoOpenTimer = new() { Interval = 20_000 };
     private readonly System.Windows.Controls.Grid videoSurface = new()
     {
-        Background = System.Windows.Media.Brushes.Black,
+        // Same stage color as the preview image, so the letterbox around the rounded video matches it.
+        Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(10, 13, 19)),
         HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch,
         VerticalAlignment = System.Windows.VerticalAlignment.Stretch
     };
@@ -115,6 +116,8 @@ public sealed class StorePreviewControl : UserControl
     };
     // Watches the first moments of playback: the cover is removed only once the position has really advanced.
     private readonly System.Windows.Forms.Timer videoStartTimer = new() { Interval = 100 };
+    private readonly System.Windows.Forms.Timer videoErrorTimer = new() { Interval = 6000 };
+    private string? videoErrorMessage;
     private Uri? videoSource;
     private bool videoMediaOpened;
     private int videoStartAttempts;
@@ -181,14 +184,15 @@ public sealed class StorePreviewControl : UserControl
         this.shellAuthentication = shellAuthentication;
         Dock = DockStyle.Fill;
         BackColor = Theme.Background;
-        mediaPlayer.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
-        mediaPlayer.VerticalAlignment = System.Windows.VerticalAlignment.Stretch;
+        mediaPlayer.HorizontalAlignment = System.Windows.HorizontalAlignment.Center;
+        mediaPlayer.VerticalAlignment = System.Windows.VerticalAlignment.Center;
         // 1080p skin videos are shown at a few hundred pixels; the default linear filter makes them look blocky.
         System.Windows.Media.RenderOptions.SetBitmapScalingMode(mediaPlayer, System.Windows.Media.BitmapScalingMode.HighQuality);
         videoSurface.Children.Add(mediaPlayer);
         videoSurface.Children.Add(videoCover);
         videoHost.Child = videoSurface;
         videoStartTimer.Tick += (_, _) => CheckVideoStart();
+        videoErrorTimer.Tick += (_, _) => ClearVideoError();
         // Render the video host in software. With hardware rendering, a window on a monitor driven by a different GPU
         // than the one WPF renders on (common with several monitors and GPUs) received the first video frames late:
         // the area stayed black or frozen for a second or more while the position was already advancing, then caught
@@ -200,6 +204,7 @@ public sealed class StorePreviewControl : UserControl
                 source.CompositionTarget.RenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
         };
         videoHost.SizeChanged += (_, _) => ResizeVideoSurface();
+        visualHost.SizeChanged += (_, _) => ResizeVideoSurface();
         videoHost.DpiChangedAfterParent += (_, _) => ResizeVideoSurface();
         videoOpenTimer.Tick += (_, _) =>
         {
@@ -207,7 +212,7 @@ public sealed class StorePreviewControl : UserControl
             if (!videoOpening || IsDisposed || Disposing) return;
             PreviewVideoResult = "MediaOpenTimedOut";
             ShowPreviewImage();
-            SetStatus("動画の読み込みに時間がかかっています。もう一度お試しください。", true);
+            ShowVideoError("動画の読み込みに時間がかかっています。もう一度お試しください。");
         };
         mediaFailedHandler = (_, e) =>
         {
@@ -221,7 +226,7 @@ public sealed class StorePreviewControl : UserControl
             playbackOpened?.TrySetResult(false);
             NativePageStyle.LogPageError("StoreVideo", e.ErrorException);
             ShowPreviewImage();
-            SetStatus("この動画を再生できませんでした。画像プレビューは引き続き利用できます。", true);
+            ShowVideoError("この動画を再生できませんでした。画像プレビューは引き続き利用できます。");
         };
         mediaPlayer.MediaFailed += mediaFailedHandler;
         mediaOpenedHandler = (_, _) =>
@@ -271,8 +276,10 @@ public sealed class StorePreviewControl : UserControl
             if (mediaEndedHandler is not null) mediaPlayer.MediaEnded -= mediaEndedHandler;
             StopMedia();
             videoHost.Child = null;
+            RoundedCorners.Release(videoHost);
             videoOpenTimer.Dispose();
             videoStartTimer.Stop(); videoStartTimer.Dispose();
+            videoErrorTimer.Stop(); videoErrorTimer.Dispose();
             countdownTimer.Stop(); countdownTimer.Dispose();
             mediaToolTips.Dispose();
             catalog.Dispose(); loginWindow?.Dispose();
@@ -2033,9 +2040,10 @@ public sealed class StorePreviewControl : UserControl
 
     private async Task<bool> PlayPreviewVideoAsync(CancellationToken externalToken)
     {
+        ClearVideoError();
         if (playVideoButton.Tag is not string url || string.IsNullOrWhiteSpace(url))
         {
-            SetStatus("このスキンの動画はありません。", true);
+            ShowVideoError("このスキンの動画はありません。");
             return false;
         }
 
@@ -2080,7 +2088,7 @@ public sealed class StorePreviewControl : UserControl
                 if (!operation.IsCancellationRequested)
                 {
                     ShowPreviewImage();
-                    SetStatus("動画を取得できませんでした。ネット接続を確認してください。", true);
+                    ShowVideoError("動画を取得できませんでした。ネット接続を確認してください。");
                 }
                 return false;
             }
@@ -2117,7 +2125,7 @@ public sealed class StorePreviewControl : UserControl
             if (ReferenceEquals(videoLoad, operation) && !IsDisposed && !Disposing)
             {
                 ShowPreviewImage();
-                SetStatus("動画を開けませんでした。", true);
+                ShowVideoError("動画を開けませんでした。");
             }
             return false;
         }
@@ -2130,6 +2138,7 @@ public sealed class StorePreviewControl : UserControl
 
     private void ShowPreviewImage()
     {
+        ClearVideoError();
         StopMedia();
         videoPaused = false;
         videoLoadingOverlay.Loading = false;
@@ -2227,7 +2236,7 @@ public sealed class StorePreviewControl : UserControl
         {
             PreviewVideoResult = "PlaybackStalled";
             ShowPreviewImage();
-            SetStatus("動画の再生を開始できませんでした。もう一度お試しください。", true);
+            ShowVideoError("動画の再生を開始できませんでした。もう一度お試しください。");
         }
     }
 
@@ -2246,6 +2255,7 @@ public sealed class StorePreviewControl : UserControl
         UpdateVideoControls();
         playbackButton.Visible = true;
         muteVideoButton.Visible = true;
+        ClearVideoError();
         SetStatus("", false);
         playbackOpened?.TrySetResult(true);
     }
@@ -2258,15 +2268,56 @@ public sealed class StorePreviewControl : UserControl
         videoHost.Visible = visible;
     }
 
+    private bool resizingVideo;
+
     private void ResizeVideoSurface()
+    {
+        if (resizingVideo || videoHost.IsDisposed) return;
+        resizingVideo = true;
+        try { FitVideoHost(); ResizeVideoContent(); }
+        finally { resizingVideo = false; }
+    }
+
+    // Once the picture size is known, shrink the host to the picture's aspect ratio and center it, so there are no
+    // letterbox bands above and below the video. Until then (the loading cover) the host fills the preview area.
+    private void FitVideoHost()
+    {
+        var area = visualHost.ClientRectangle;
+        if (!videoHost.Visible || mediaPlayer.NaturalVideoWidth <= 0 || mediaPlayer.NaturalVideoHeight <= 0 || area.Width < 2 || area.Height < 2) return;
+        var fit = Math.Min(area.Width / (double)mediaPlayer.NaturalVideoWidth, area.Height / (double)mediaPlayer.NaturalVideoHeight);
+        var width = Math.Max(1, (int)Math.Floor(mediaPlayer.NaturalVideoWidth * fit));
+        var height = Math.Max(1, (int)Math.Floor(mediaPlayer.NaturalVideoHeight * fit));
+        var bounds = new Rectangle(area.X + (area.Width - width) / 2, area.Y + (area.Height - height) / 2, width, height);
+        if (videoHost.Dock != DockStyle.None) videoHost.Dock = DockStyle.None;
+        if (videoHost.Bounds != bounds) videoHost.Bounds = bounds;
+    }
+
+    private void ResizeVideoContent()
     {
         var scale = Math.Max(1, videoHost.DeviceDpi) / 96d;
         var width = Math.Max(1, videoHost.ClientSize.Width / scale);
         var height = Math.Max(1, videoHost.ClientSize.Height / scale);
         videoSurface.Width = width;
         videoSurface.Height = height;
-        mediaPlayer.Width = width;
-        mediaPlayer.Height = height;
+        // Size the MediaElement to the letterboxed picture itself (centered by the grid) so the picture's own
+        // corners can be rounded, not only the frame around it.
+        var videoWidth = width;
+        var videoHeight = height;
+        if (mediaPlayer.NaturalVideoWidth > 0 && mediaPlayer.NaturalVideoHeight > 0)
+        {
+            var fit = Math.Min(width / mediaPlayer.NaturalVideoWidth, height / mediaPlayer.NaturalVideoHeight);
+            videoWidth = Math.Max(1, Math.Floor(mediaPlayer.NaturalVideoWidth * fit));
+            videoHeight = Math.Max(1, Math.Floor(mediaPlayer.NaturalVideoHeight * fit));
+        }
+        mediaPlayer.HorizontalAlignment = System.Windows.HorizontalAlignment.Center;
+        mediaPlayer.VerticalAlignment = System.Windows.VerticalAlignment.Center;
+        mediaPlayer.Width = videoWidth;
+        mediaPlayer.Height = videoHeight;
+        // The radius is in device-independent pixels, the same visual size as UiMetrics.CornerRadius on the image.
+        var radius = Math.Min(UiMetrics.CornerRadius, Math.Min(videoWidth, videoHeight) / 2);
+        mediaPlayer.Clip = new System.Windows.Media.RectangleGeometry(new System.Windows.Rect(0, 0, videoWidth, videoHeight), radius, radius);
+        // Round the host window itself as well, so the frame and the loading cover match the preview image.
+        if (videoHost.Width > 1 && videoHost.Height > 1) RoundedCorners.Apply(videoHost, UiMetrics.Px(videoHost, UiMetrics.CornerRadius));
     }
 
     private async Task LoadPreviewImageAsync(IEnumerable<string?> urls, int generation, CancellationToken cancellationToken)
@@ -2334,6 +2385,29 @@ public sealed class StorePreviewControl : UserControl
     private string? SelectedVideo(SkinCard skin, int chroma, int level) =>
         (chroma >= 0 && chroma < skin.Chromas.Count ? skin.Chromas[chroma].Video : null) ??
         (level >= 0 && level < skin.Levels.Count ? skin.Levels[level].Video : null);
+
+    // Video errors are transient: SetStatus keeps an error until another non-empty message replaces it, which left
+    // "動画を取得できませんでした…" on screen indefinitely. These clear after a few seconds, on the next play attempt,
+    // or when the preview returns to the image (selection changes and the stop button go through ShowPreviewImage).
+    private void ShowVideoError(string message)
+    {
+        SetStatus(message, true);
+        videoErrorMessage = message;
+        videoErrorTimer.Stop();
+        videoErrorTimer.Start();
+    }
+
+    private void ClearVideoError()
+    {
+        videoErrorTimer.Stop();
+        if (videoErrorMessage is null) return;
+        if (settledStatusError && settledStatus == videoErrorMessage)
+        {
+            settledStatus = ""; settledStatusError = false;
+            SetStatusDisplay(activeProgressStatuses.Count > 0 ? activeProgressStatuses[^1] : "", error: false);
+        }
+        videoErrorMessage = null;
+    }
 
     private void SetStatus(string message, bool error)
     {

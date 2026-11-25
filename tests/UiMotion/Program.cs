@@ -377,6 +377,16 @@ internal static class Program
         var overlay = (Control)typeof(StorePreviewControl).GetField("videoLoadingOverlay", flags)!.GetValue(store)!;
         var cache = typeof(StorePreviewControl).Assembly.GetType("ValoAutoPick.NativeVideoCache")!;
         var downloads = (SemaphoreSlim)cache.GetField("Downloads", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        // A video error must not stay on screen: returning to the image clears it, and so does its timer.
+        typeof(StorePreviewControl).GetMethod("ShowVideoError", flags)!.Invoke(store, ["動画を取得できませんでした。ネット接続を確認してください。"]);
+        Assert(status.Text.Contains("動画を取得できませんでした"), "video errors are shown");
+        typeof(StorePreviewControl).GetMethod("ShowPreviewImage", flags)!.Invoke(store, []);
+        Assert(status.Text.Length == 0, "returning to the image clears a video error");
+        typeof(StorePreviewControl).GetMethod("ShowVideoError", flags)!.Invoke(store, ["動画を開けませんでした。"]);
+        var errorTimer = (System.Windows.Forms.Timer)typeof(StorePreviewControl).GetField("videoErrorTimer", flags)!.GetValue(store)!;
+        Assert(errorTimer.Enabled, "a video error starts its clear timer");
+        typeof(StorePreviewControl).GetMethod("ClearVideoError", flags)!.Invoke(store, []);
+        Assert(status.Text.Length == 0 && !errorTimer.Enabled, "the clear timer removes a video error");
         using var stop = new CancellationTokenSource();
         await downloads.WaitAsync();
         try
