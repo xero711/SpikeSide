@@ -189,6 +189,16 @@ public sealed class StorePreviewControl : UserControl
         videoSurface.Children.Add(videoCover);
         videoHost.Child = videoSurface;
         videoStartTimer.Tick += (_, _) => CheckVideoStart();
+        // Render the video host in software. With hardware rendering, a window on a monitor driven by a different GPU
+        // than the one WPF renders on (common with several monitors and GPUs) received the first video frames late:
+        // the area stayed black or frozen for a second or more while the position was already advancing, then caught
+        // up with a blocky picture. Software composition shows frames immediately on every monitor, and for a preview
+        // of a few hundred pixels it used less CPU than the hardware path in measurement.
+        videoSurface.Loaded += (_, _) =>
+        {
+            if (System.Windows.PresentationSource.FromVisual(videoSurface) is System.Windows.Interop.HwndSource source)
+                source.CompositionTarget.RenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
+        };
         videoHost.SizeChanged += (_, _) => ResizeVideoSurface();
         videoHost.DpiChangedAfterParent += (_, _) => ResizeVideoSurface();
         videoOpenTimer.Tick += (_, _) =>
