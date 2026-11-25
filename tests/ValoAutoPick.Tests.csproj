@@ -25,6 +25,9 @@
     <Compile Include="../src/ValoAutoPick/StorefrontModels.cs" Link="StorefrontModels.cs" />
     <Compile Include="../src/ValoAutoPick/PlayerInsights.cs" Link="PlayerInsights.cs" />
     <Compile Include="../src/ValoAutoPick/LiveMatchState.cs" Link="LiveMatchState.cs" />
+    <Compile Include="../src/ValoAutoPick/LiveTrackerReader.cs" Link="LiveTrackerReader.cs" />
+    <Compile Include="../src/ValoAutoPick/LiveScoreboard.cs" Link="LiveScoreboard.cs" />
+    <Compile Include="../src/ValoAutoPick/OverwolfEventBridge.cs" Link="OverwolfEventBridge.cs" />
     <Compile Include="../src/ValoAutoPick/MatchHistorySaveQueue.cs" Link="MatchHistorySaveQueue.cs" />
   </ItemGroup>
 </Project>

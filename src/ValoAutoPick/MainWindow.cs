@@ -277,10 +277,12 @@ public sealed class MainWindow : DarkForm
                 if (Edition.IsTrial && Environment.GetCommandLineArgs().Contains("--preview-trial-exhausted")) { SetTrialRemaining(0); ReportPick("この試合の処理は完了 · 次の試合も自動で検知します"); }
                 Hide(); Show(); TopMost = true; Activate();
                 if (Environment.GetCommandLineArgs().Contains("--preview-connected")) { ApplyAccountLabels(true, "ExamplePlayer#1234"); login.Enabled = false; logout.Visible = true; }
-                if (Environment.GetCommandLineArgs().Contains("--preview-live"))
+                if (Environment.GetCommandLineArgs().Any(x => x is "--preview-live" or "--preview-live-full" or "--preview-live-pick"))
                 {
                     ShowMainPage(MainPage.Live);
-                    liveMatch!.ShowPreview();
+                    if (Environment.GetCommandLineArgs().Contains("--preview-live-full")) liveMatch!.ShowFullPreview(false);
+                    else if (Environment.GetCommandLineArgs().Contains("--preview-live-pick")) liveMatch!.ShowFullPreview(true);
+                    else liveMatch!.ShowPreview();
                 }
                 else if (Environment.GetCommandLineArgs().Contains("--preview-match-history"))
                 {

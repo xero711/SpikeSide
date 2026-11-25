@@ -5,7 +5,7 @@ namespace ValoAutoPick;
 
 // Event-style updates (used by the preview and tests) arrive as independent, sometimes JSON-encoded values rather than a complete match.
 // The live roster itself is built by ReplaceRoster from the Riot client.
-// Keep only the current match in memory; never resolve hidden identities or persist player data.
+// Keep the current match in memory; clear it when the account or match changes.
 internal sealed class LiveMatchState
 {
     private readonly Dictionary<string, JsonObject> players = new(StringComparer.OrdinalIgnoreCase);
@@ -16,6 +16,56 @@ internal sealed class LiveMatchState
 
     public void Reset() { players.Clear(); values.Clear(); MatchEnded = false; }
     public void SetScore(int allies, int enemies) => values["score"] = JsonSerializer.Serialize(new { won = allies, lost = enemies });
+
+    public void ApplyNames(IReadOnlyDictionary<string, (string GameName, string TagLine)> names)
+    {
+        foreach (var player in players.Values)
+        {
+            var id = Text(player, "player_id");
+            if (!names.TryGetValue(id, out var name) || string.IsNullOrWhiteSpace(name.GameName)) continue;
+            player["name"] = string.IsNullOrWhiteSpace(name.TagLine) ? name.GameName : $"{name.GameName}#{name.TagLine}";
+        }
+    }
+
+    public void ApplyRanks(IReadOnlyDictionary<string, LiveRecentRank> ranks)
+    {
+        foreach (var player in players.Values)
+        {
+            if (!ranks.TryGetValue(Text(player, "player_id"), out var rank)) continue;
+            player["rank"] = rank.DisplayName;
+            player["rank_tier"] = rank.Tier;
+            if (rank.Rating is int rr) player["rank_rr"] = rr;
+            else player.Remove("rank_rr");
+        }
+    }
+
+    public void ApplyScores(IReadOnlyDictionary<string, LiveScore> scores)
+    {
+        foreach (var player in players.Values)
+        {
+            if (!scores.TryGetValue(Text(player, "player_id"), out var score)) continue;
+            player["kills"] = score.Kills; player["deaths"] = score.Deaths; player["assists"] = score.Assists;
+            SetOrRemove(player, "money", score.Money);
+            SetOrRemove(player, "ult_points", score.UltPoints);
+            SetOrRemove(player, "ult_max", score.UltMax);
+            SetOrRemove(player, "alive", score.Alive);
+            SetOrRemove(player, "shield", score.Shield);
+            SetOrRemove(player, "weapon", score.Weapon);
+            SetOrRemove(player, "spike", score.Spike);
+            SetOrRemove(player, "headshots", score.Headshots);
+        }
+    }
+
+    private static readonly string[] LiveScoreKeys = ["kills", "deaths", "assists", "money", "ult_points", "ult_max", "alive", "shield", "weapon", "spike", "headshots"];
+
+    public void ClearScores()
+    {
+        foreach (var player in players.Values) foreach (var key in LiveScoreKeys) player.Remove(key);
+    }
+
+    private static void SetOrRemove(JsonObject player, string key, int? value) { if (value is int v) player[key] = v; else player.Remove(key); }
+    private static void SetOrRemove(JsonObject player, string key, bool? value) { if (value is bool v) player[key] = v; else player.Remove(key); }
+    private static void SetOrRemove(JsonObject player, string key, string? value) { if (value is not null) player[key] = value; else player.Remove(key); }
 
     // When a refresh fails, the last confirmed roster stays on screen (labelled with its time) so one dropped
     // request does not blank the list or close the player the user is reading. This decides when it must go.
@@ -29,7 +79,7 @@ internal sealed class LiveMatchState
     public void ReplaceRoster(LiveRosterMatch match, string self, string selfName, IReadOnlyList<Agent> agents)
     {
         Reset();
-        values["match_id"] = match.MatchId; values["map"] = match.MapId; values["game_mode"] = match.ModeId;
+        values["match_id"] = match.MatchId; values["map"] = match.MapId; values["game_mode"] = match.ModeId; values["stage"] = "game";
         var team = match.Players.FirstOrDefault(p => p.Subject.Equals(self, StringComparison.OrdinalIgnoreCase))?.TeamId;
         var slot = 0;
         foreach (var p in match.Players.OrderBy(p => p.Subject, StringComparer.OrdinalIgnoreCase))
@@ -37,8 +87,31 @@ internal sealed class LiveMatchState
             var isSelf = p.Subject.Equals(self, StringComparison.OrdinalIgnoreCase);
             var agent = agents.FirstOrDefault(a => a.Id.Equals(p.AgentId, StringComparison.OrdinalIgnoreCase))?.Name ?? "不明";
             var player = new JsonObject { ["player_id"] = p.Subject, ["name"] = isSelf ? selfName : p.Incognito ? "非表示" : $"{agent}（名前未取得）", ["character"] = agent, ["is_local"] = isSelf };
+            if (!string.IsNullOrWhiteSpace(p.AgentId)) player["agent_id"] = p.AgentId;
             if (!string.IsNullOrEmpty(team) && !string.IsNullOrEmpty(p.TeamId)) player["teammate"] = p.TeamId.Equals(team, StringComparison.OrdinalIgnoreCase);
             if (p.AccountLevel is int level) player["account_level"] = level;
+            players[(slot++).ToString()] = player;
+        }
+    }
+
+    public void ReplacePregame(MatchSnapshot match, string self, string selfName, IReadOnlyList<Agent> agents)
+    {
+        Reset();
+        values["match_id"] = match.Id; values["map"] = match.MapId; values["stage"] = "pregame";
+        var allyNumber = 0;
+        var slot = 0;
+        foreach (var p in match.Allies.OrderBy(p => p.Subject, StringComparer.OrdinalIgnoreCase))
+        {
+            var isSelf = p.Subject.Equals(self, StringComparison.OrdinalIgnoreCase);
+            var agent = string.IsNullOrWhiteSpace(p.CharacterID) ? "未選択" :
+                agents.FirstOrDefault(a => a.Id.Equals(p.CharacterID, StringComparison.OrdinalIgnoreCase))?.Name ?? "不明";
+            var selection = p.CharacterSelectionState switch { "locked" => "確定", "selected" => "選択中", _ => "未確定" };
+            var player = new JsonObject
+            {
+                ["player_id"] = p.Subject, ["name"] = isSelf ? selfName : $"味方 {++allyNumber}",
+                ["character"] = agent, ["teammate"] = true, ["is_local"] = isSelf, ["selection"] = selection
+            };
+            if (!string.IsNullOrWhiteSpace(p.CharacterID)) player["agent_id"] = p.CharacterID;
             players[(slot++).ToString()] = player;
         }
     }

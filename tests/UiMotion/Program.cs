@@ -429,20 +429,88 @@ internal static class Program
         using var live = (Control)Activator.CreateInstance(type, nonPublic: true)!;
         live.Dock = DockStyle.Fill; window.Controls.Add(live); window.Show(); Application.DoEvents();
         type.GetMethod("ShowPreview", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(live, null);
-        var roster = (ListView)type.GetField("roster", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
+        var roster = (Control)type.GetField("roster", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
+        var rosterType = roster.GetType();
+        List<object> Rows() => ((System.Collections.IEnumerable)rosterType.GetProperty("Rows")!.GetValue(roster)!).Cast<object>().ToList();
+        string RowValue(object row, string name) => row.GetType().GetProperty(name)!.GetValue(row)?.ToString() ?? "";
+        Rectangle RowBounds(object row) => (Rectangle)rosterType.GetMethod("RowBounds")!.Invoke(roster, [RowValue(row, "Slot")])!;
+        void SelectRow(int index) { rosterType.GetMethod("SelectSlot")!.Invoke(roster, [RowValue(Rows()[index], "Slot")]); Application.DoEvents(); }
+        string Arrangement() => rosterType.GetProperty("Arrangement")!.GetValue(roster)!.ToString()!;
         var details = (Label)type.GetField("details", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
-        Assert(roster.Items.Count == 2 && details.Text.Contains("Player One"), "live tracker renders a sample match and selected player");
-        roster.Items[1].Selected = true; Application.DoEvents();
+        Assert(Rows().Count == 2 && details.Text.Contains("Player One"), "live tracker renders a sample match and selected player");
+        SelectRow(1);
         Assert(details.Text.Contains("Player Two") && details.Text.Contains("Sage"), "selecting a different player updates live details");
-        Assert(roster.Columns.Cast<ColumnHeader>().Sum(column => column.Width) <= roster.ClientSize.Width, "live tracker columns fit at a compact window size");
+        Assert((string?)rosterType.GetProperty("SelectedSlot")!.GetValue(roster) == RowValue(Rows()[1], "Slot"), "the roster keeps the clicked player selected");
+        Assert(Rows().All(row => RowBounds(row).Right <= roster.ClientSize.Width && RowBounds(row).Left >= 0), "live tracker rows fit at a compact window size");
+        {
+            var half = roster.ClientSize.Height / 2;
+            var ally = RowBounds(Rows().Single(row => RowValue(row, "Side") == "Ally"));
+            var enemy = RowBounds(Rows().Single(row => RowValue(row, "Side") == "Enemy"));
+            Assert(ally.Bottom <= half && enemy.Top >= half, "allies are listed in the top half and opponents in the bottom half");
+            Assert(ally.Height >= Px(live, 40) && ally.Height >= TextRenderer.MeasureText("国Ag", roster.Font).Height * 3 / 2,
+                "live roster rows are large enough to read");
+        }
         var summary = (Label)type.GetField("summary", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
+        var refresh = live.Controls.Find("liveRefresh", true).Single();
+        foreach (var width in new[] { 950, 720, 1300 })
+        {
+            window.ClientSize = new Size(width, 650);
+            window.PerformLayout(); live.PerformLayout();
+            var buttonBottom = refresh.PointToScreen(new Point(0, refresh.Height)).Y;
+            var summaryTop = summary.Parent!.PointToScreen(Point.Empty).Y;
+            Assert(summaryTop - buttonBottom >= Px(live, 6), $"live refresh button leaves a gap above the summary at {width}px");
+        }
         var modeName = type.GetMethod("ModeName", BindingFlags.Static | BindingFlags.NonPublic)!;
         Assert((string)modeName.Invoke(null, ["/Game/GameModes/Bomb/BombGameMode.BombGameMode_C"])! == "",
             "shared bomb game mode asset path does not guess competitive vs unrated");
         Assert((string)modeName.Invoke(null, ["/Game/GameModes/QuickBomb/QuickBombGameMode.QuickBombGameMode_C"])! == "スパイクラッシュ",
             "specific game mode asset paths map to Japanese names");
+        var liveState = type.GetField("state", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
+        var pregame = new MatchSnapshot("pregame", "character_select_active", [new Player("self", "agent-a", "locked"), new Player("ally", "", "")], "Ascent");
+        liveState.GetType().GetMethod("ReplacePregame")!.Invoke(liveState, [pregame, "self", "Myself#JP", new[] { new Agent("agent-a", "ジェット", "デュエリスト") }]);
+        liveState.GetType().GetMethod("ApplyNames")!.Invoke(liveState, [new Dictionary<string, (string GameName, string TagLine)>(StringComparer.OrdinalIgnoreCase) { ["ally"] = ("AllyName", "JP1") }]);
+        liveState.GetType().GetMethod("ApplyRanks")!.Invoke(liveState, [new Dictionary<string, LiveRecentRank>(StringComparer.OrdinalIgnoreCase) { ["ally"] = new LiveRecentRank(20, 74) }]);
+        type.GetMethod("RenderState", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(live, null);
+        Assert(summary.Text.Contains("ピック中") && Rows().Count == 2 && Arrangement() == "Pregame" && (bool)rosterType.GetProperty("ShowsPendingOpponents")!.GetValue(roster)!,
+            "live tracker shows the pregame stage with allies on top and opponents marked as not yet available");
+        Assert(Rows().All(row => RowValue(row, "Side") == "Ally" && RowBounds(row).Bottom <= roster.ClientSize.Height / 2),
+            "pregame lists only real allies, all in the top half, without invented opponents");
+        Assert(Rows().Any(row => RowValue(row, "Name") == "Myself#JP" && RowValue(row, "Status") == "確定" && RowValue(row, "AgentId") == "agent-a" && RowValue(row, "Agent") == "ジェット") &&
+            Rows().Any(row => RowValue(row, "Name") == "AllyName#JP1" && RowValue(row, "Agent") == "未選択" && RowValue(row, "Rank") == "ダイヤモンド 3" && RowValue(row, "RankTier") == "20"),
+            "pregame shows resolved names, rank, agents and selection status");
+
+        // A full 5v5 core game: five rows per half, all inside the list without scrolling; selection survives a re-render.
+        const string selfId = "00000000-0000-0000-0000-000000000000";
+        var players = Enumerable.Range(0, 10).Select(i => new LiveRosterPlayer(i == 0 ? selfId : $"00000000-0000-0000-0000-00000000000{i}", i < 5 ? "Blue" : "Red", "", false, false, null)).ToList();
+        liveState.GetType().GetMethod("ReplaceRoster")!.Invoke(liveState, [new LiveRosterMatch("game-1", "Ascent", "competitive", players), selfId, "Myself#JP", Array.Empty<Agent>()]);
+        liveState.GetType().GetMethod("ApplyRanks")!.Invoke(liveState, [new Dictionary<string, LiveRecentRank>(StringComparer.OrdinalIgnoreCase) { [players[6].Subject] = new LiveRecentRank(12, 30) }]);
+        type.GetMethod("RenderState", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(live, null);
+        {
+            var half = roster.ClientSize.Height / 2;
+            Assert(Rows().Count == 10 && Arrangement() == "Teams", "a 5v5 match lists all ten players");
+            Assert(Rows().Where(row => RowValue(row, "Side") == "Ally").All(row => RowBounds(row).Bottom <= half) &&
+                Rows().Where(row => RowValue(row, "Side") == "Enemy").All(row => RowBounds(row).Top >= half && RowBounds(row).Bottom <= roster.ClientSize.Height),
+                "five allies fit the top half and five opponents fit the bottom half");
+            Assert(Rows().Count(row => RowValue(row, "Side") == "Ally") == 5 && RowValue(Rows()[0], "IsLocal") == "True", "the local player leads the ally half");
+            Assert(Rows().Any(row => RowValue(row, "RankTier") == "12" && RowValue(row, "Side") == "Enemy"), "a fetched rank tier reaches the roster row");
+            var enemyIndex = Rows().FindIndex(row => RowValue(row, "Side") == "Enemy");
+            SelectRow(enemyIndex);
+            var chosen = RowValue(Rows()[enemyIndex], "Slot");
+            type.GetMethod("RenderState", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(live, null);
+            Assert((string?)rosterType.GetProperty("SelectedSlot")!.GetValue(roster) == chosen && details.Text.Contains("相手"), "a re-render keeps the selected player and details");
+        }
+        // Deathmatch and unknown teams: nobody is dropped.
+        var ffa = Enumerable.Range(0, 14).Select(i => new LiveRosterPlayer(i == 0 ? selfId : $"00000000-0000-0000-0000-0000000000{i:00}", $"team-{i}", "", false, false, null)).ToList();
+        liveState.GetType().GetMethod("ReplaceRoster")!.Invoke(liveState, [new LiveRosterMatch("game-2", "Ascent", "/Game/GameModes/Deathmatch/DeathmatchGameMode.DeathmatchGameMode_C", ffa), selfId, "Myself#JP", Array.Empty<Agent>()]);
+        type.GetMethod("RenderState", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(live, null);
+        Assert(Rows().Count == 14 && Arrangement() == "FreeForAll", "deathmatch lists all fourteen players in one group");
+        var unknown = Enumerable.Range(0, 4).Select(i => new LiveRosterPlayer(i == 0 ? selfId : $"00000000-0000-0000-0000-00000000000{i}", "", "", false, false, null)).ToList();
+        liveState.GetType().GetMethod("ReplaceRoster")!.Invoke(liveState, [new LiveRosterMatch("game-3", "Ascent", "", unknown), selfId, "Myself#JP", Array.Empty<Agent>()]);
+        type.GetMethod("RenderState", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(live, null);
+        Assert(Rows().Count == 4 && Rows().All(row => RowValue(row, "Side") == "Unknown"), "players without a known team are still listed");
+
         type.GetMethod("ResetSession", BindingFlags.Instance | BindingFlags.Public)!.Invoke(live, null);
-        Assert(roster.Items.Count == 0 && !summary.Text.Contains("アセント") && !details.Text.Contains("Player Two"),
+        Assert(Rows().Count == 0 && !summary.Text.Contains("アセント") && !details.Text.Contains("Player Two"),
             "resetting live session clears stale match summary, roster, and selected player details");
 
         // A failed refresh holds a young roster (labelled, score hidden) but drops an old one together with the selection.
@@ -454,21 +522,21 @@ internal static class Program
         var expire = type.GetMethod("ExpireStaleSnapshot", nonPublic)!;
         var render = type.GetMethod("RenderState", nonPublic)!;
         showPreview.Invoke(live, null);
-        roster.Items[1].Selected = true; Application.DoEvents();
+        SelectRow(1);
         lastSuccess.SetValue(live, (DateTimeOffset?)DateTimeOffset.UtcNow);
         keepOrDrop.Invoke(live, ["試合情報を取得できませんでした。再試行します"]); render.Invoke(live, null);
-        Assert(roster.Items.Count == 2 && details.Text.Contains("Player Two"), "a failed refresh keeps a young roster and the selected player");
+        Assert(Rows().Count == 2 && details.Text.Contains("Player Two"), "a failed refresh keeps a young roster and the selected player");
         Assert(summary.Text.Contains("再接続待ち") && !summary.Text.Contains("4 : 3"), "a held roster says it is waiting to reconnect and hides the score");
         Assert(connection.Text.Contains("時点の情報を表示中"), "a held roster states when it was last confirmed");
         Assert(!(bool)expire.Invoke(live, null)!, "a young roster is not expired by the render tick");
         lastSuccess.SetValue(live, (DateTimeOffset?)DateTimeOffset.UtcNow.AddMinutes(-10));
         Assert((bool)expire.Invoke(live, null)!, "a roster nobody refreshed for minutes expires, for example after a long 429 wait or a hidden tab");
         render.Invoke(live, null);
-        Assert(roster.Items.Count == 0 && !details.Text.Contains("Player Two") && !summary.Text.Contains("アセント"), "an expired roster clears the list, the selection and the match summary");
+        Assert(Rows().Count == 0 && !details.Text.Contains("Player Two") && !summary.Text.Contains("アセント"), "an expired roster clears the list, the selection and the match summary");
         showPreview.Invoke(live, null);
         lastSuccess.SetValue(live, (DateTimeOffset?)DateTimeOffset.UtcNow.AddMinutes(-10));
         keepOrDrop.Invoke(live, ["試合情報を取得できませんでした。再試行します"]); render.Invoke(live, null);
-        Assert(roster.Items.Count == 0 && !details.Text.Contains("Player One"), "a failed refresh drops a roster that is already too old");
+        Assert(Rows().Count == 0 && !details.Text.Contains("Player One"), "a failed refresh drops a roster that is already too old");
         window.Close();
     }
 

@@ -1,5 +1,17 @@
 using ValoAutoPick;
 
+if (args.Contains("--probe-live-names"))
+{
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    using var api = new RiotApi();
+    await api.EnsureConnected("auto", timeout.Token);
+    var names = await api.GetPlayerNames([api.Subject], timeout.Token);
+    Console.WriteLine($"Name service: selfReturned={names.ContainsKey(api.Subject)}");
+    var rank = await api.GetPlayerRecentRank(api.Subject, timeout.Token);
+    Console.WriteLine($"Recent competitive rank: available={rank != null}");
+    return 0;
+}
+
 if (args.Contains("--probe-live-match"))
 {
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
@@ -9,6 +21,8 @@ if (args.Contains("--probe-live-match"))
     var coreId = await api.GetCoreMatchId(timeout.Token);
     var pregameId = coreId == null ? await api.GetMatchId(timeout.Token) : null;
     Console.WriteLine($"Connected: running={RiotApi.IsValorantRunning()}, region={api.RegionLabel}, coreMatch={coreId != null}, pregameMatch={pregameId != null}");
+    var trackerSnapshot = await LiveTrackerReader.ReadAsync(api, api.Subject, timeout.Token);
+    Console.WriteLine($"Tracker: phase={(trackerSnapshot.Game != null ? "game" : trackerSnapshot.Pregame != null ? "pregame" : "waiting")}, players={trackerSnapshot.Game?.Players.Count ?? trackerSnapshot.Pregame?.Allies.Count ?? 0}");
     if (coreId != null)
     {
         var roster = await api.GetCoreLiveRoster(coreId, timeout.Token);
@@ -406,8 +420,152 @@ tests.Add(("live roster preserves privacy flags and rejects a different match", 
     state.ReplaceRoster(match, "33333333-3333-3333-3333-333333333333", "自分", [new Agent("agent-a", "ジェット", ""), new Agent("agent-b", "セージ", "")]);
     Equal("非表示", LiveMatchState.Text(state.Players["0"], "name")); Equal("自分", LiveMatchState.Text(state.Players["1"], "name"));
     Equal("", LiveMatchState.Text(state.Players["0"], "account_level")); Equal("21", LiveMatchState.Text(state.Players["1"], "account_level"));
+    Equal("agent-a", LiveMatchState.Text(state.Players["0"], "agent_id")); Equal("agent-b", LiveMatchState.Text(state.Players["1"], "agent_id"));
+    Equal("false", LiveMatchState.Text(state.Players["0"], "teammate")); Equal("true", LiveMatchState.Text(state.Players["1"], "teammate"));
     var failed = false; try { RiotApi.ParseCoreLiveRoster(json.RootElement, "another"); } catch (InvalidDataException) { failed = true; }
     Equal(true, failed); return Task.CompletedTask;
+}));
+tests.Add(("live tracker moves from pregame to core game and then clears", async () => {
+    var source = new FakeLiveTrackerSource();
+    var agents = new[] { new Agent("agent-a", "ジェット", "デュエリスト") };
+    source.PregameId = "pregame";
+    source.Pregame = new MatchSnapshot("pregame", "character_select_active", [new Player("self", "agent-a", "locked"), new Player("ally", "", "")], "Ascent");
+    var first = await LiveTrackerReader.ReadAsync(source, "self", default);
+    Equal(true, first.Pregame != null); Equal<LiveRosterMatch?>(null, first.Game);
+    var state = new LiveMatchState(); state.ReplacePregame(first.Pregame!, "self", "自分#JP", agents);
+    Equal("pregame", state.Values["stage"]); Equal(2, state.Players.Count);
+    var self = state.Players.Values.Single(p => LiveMatchState.Text(p, "player_id") == "self");
+    var ally = state.Players.Values.Single(p => LiveMatchState.Text(p, "player_id") == "ally");
+    Equal("自分#JP", LiveMatchState.Text(self, "name")); Equal("確定", LiveMatchState.Text(self, "selection"));
+    Equal("未選択", LiveMatchState.Text(ally, "character")); Equal("未確定", LiveMatchState.Text(ally, "selection"));
+    Equal("agent-a", LiveMatchState.Text(self, "agent_id")); Equal("", LiveMatchState.Text(ally, "agent_id"));
+    state.ApplyNames(new Dictionary<string, (string, string)>(StringComparer.OrdinalIgnoreCase) { ["ally"] = ("Player", "JP1"), ["not-in-match"] = ("Other", "1") });
+    Equal("Player#JP1", LiveMatchState.Text(ally, "name")); Equal(2, state.Players.Count);
+    source.CoreId = "game";
+    source.Game = new LiveRosterMatch("game", "Ascent", "competitive", [new LiveRosterPlayer("self", "Blue", "agent-a", false, true, null)]);
+    var second = await LiveTrackerReader.ReadAsync(source, "self", default);
+    Equal(true, second.Game != null); Equal<MatchSnapshot?>(null, second.Pregame);
+    state.ReplaceRoster(second.Game!, "self", "自分#JP", agents); Equal("game", state.Values["stage"]); Equal(1, state.Players.Count);
+    source.CoreId = null; source.PregameId = null;
+    var idle = await LiveTrackerReader.ReadAsync(source, "self", default);
+    Equal<LiveRosterMatch?>(null, idle.Game); Equal<MatchSnapshot?>(null, idle.Pregame);
+}));
+tests.Add(("live player name lookup batches IDs and parses Riot IDs", async () => {
+    const string first = "11111111-1111-1111-1111-111111111111", second = "33333333-3333-3333-3333-333333333333";
+    var transport = new Transport { NameResponse = """[{"Subject":"11111111-1111-1111-1111-111111111111","GameName":"First","TagLine":"JP1"},{"Subject":"33333333-3333-3333-3333-333333333333","GameName":"Second","TagLine":"ABC"}]""" };
+    using var api = new RiotApi(transport);
+    await api.Login(new AuthResult("fake-access", "fake-id", now.AddHours(1)), "ap", default);
+    var names = await api.GetPlayerNames([first, second, first, "invalid"], default);
+    Equal(2, names.Count); Equal(("Second", "ABC"), names[second]);
+    Equal(1, transport.Calls.Count(call => call.Uri.AbsolutePath == "/name-service/v2/players" && call.Method == HttpMethod.Put));
+}));
+tests.Add(("live tracker parses and displays the most recent competitive rank", async () => {
+    const string subject = "11111111-1111-1111-1111-111111111111";
+    var transport = new Transport { RankResponse = """{"Matches":[{"TierAfterUpdate":20,"RankedRatingAfterUpdate":74}]}""" };
+    using var api = new RiotApi(transport);
+    await api.Login(new AuthResult("fake-access", "fake-id", now.AddHours(1)), "ap", default);
+    var rank = await api.GetPlayerRecentRank(subject, default);
+    Equal("ダイヤモンド 3", rank!.DisplayName); Equal<int?>(74, rank.Rating);
+    Equal(true, transport.Calls.Any(call => call.Uri.AbsolutePath == $"/mmr/v1/players/{subject}/competitiveupdates" && call.Uri.Query.Contains("endIndex=1")));
+    var state = new LiveMatchState();
+    state.ReplacePregame(new MatchSnapshot("match", "character_select_active", [new Player(subject, "", "")]), subject, "self", []);
+    state.ApplyRanks(new Dictionary<string, LiveRecentRank>(StringComparer.OrdinalIgnoreCase) { [subject] = rank });
+    Equal("ダイヤモンド 3", LiveMatchState.Text(state.Players["0"], "rank")); Equal("74", LiveMatchState.Text(state.Players["0"], "rank_rr"));
+    Equal("20", LiveMatchState.Text(state.Players["0"], "rank_tier"));
+    using var missing = System.Text.Json.JsonDocument.Parse("""{"Matches":[]}"""); Equal<LiveRecentRank?>(null, LiveRecentRank.Parse(missing.RootElement));
+    using var malformed = System.Text.Json.JsonDocument.Parse("""{"Matches":[{"TierAfterUpdate":"bad"}]}"""); Equal<LiveRecentRank?>(null, LiveRecentRank.Parse(malformed.RootElement));
+}));
+tests.Add(("Overwolf scoreboard only applies validated current match and participant data", () => {
+    const string match = "22222222-2222-2222-2222-222222222222", subject = "11111111-1111-1111-1111-111111111111";
+    var payload = System.Text.Json.JsonSerializer.Serialize(new { info = new { match_info = new Dictionary<string, object> {
+        ["match_id"] = match,
+        ["scoreboard_0"] = System.Text.Json.JsonSerializer.Serialize(new { player_id = subject, kills = 7, deaths = 3, assists = 2 }),
+        ["scoreboard_1"] = new { player_id = "other", kills = 5, deaths = 2, assists = 1 }
+    } } });
+    var scores = LiveScoreboard.Parse(payload, match, [subject], subject);
+    Equal(1, scores.Count); Equal(new LiveScore(7, 3, 2), scores[subject]);
+    Equal(0, LiveScoreboard.Parse(payload, "33333333-3333-3333-3333-333333333333", [subject], subject).Count);
+    Equal(0, LiveScoreboard.Parse(payload, match, ["other-player"], subject).Count);
+    Equal(0, LiveScoreboard.Parse("not-json", match, [subject], subject).Count);
+    var pseudo = System.Text.Json.JsonSerializer.Serialize(new { info = new { match_info = new Dictionary<string, object> {
+        ["pseudo_match_id"] = "session", ["scoreboard_0"] = new { player_id = subject, kills = 0, deaths = 0, assists = 0 },
+        ["scoreboard_1"] = new { player_id = "ally", kills = 1, deaths = 2, assists = 3 }
+    } } });
+    Equal(2, LiveScoreboard.Parse(pseudo, match, [subject, "ally"], subject).Count);
+    Equal(0, LiveScoreboard.Parse(pseudo, match, [subject, "different"], subject).Count);
+    var state = new LiveMatchState();
+    state.ReplaceRoster(new LiveRosterMatch(match, "Ascent", "", [new LiveRosterPlayer(subject, "Blue", "", false, false, null)]), subject, "self", []);
+    state.ApplyScores(scores); Equal("7", LiveMatchState.Text(state.Players["0"], "kills"));
+    state.ClearScores(); Equal("", LiveMatchState.Text(state.Players["0"], "kills"));
+    return Task.CompletedTask;
+}));
+tests.Add(("Overwolf scoreboard falls back to Riot ID and local flag and keeps live extras", () => {
+    const string match = "22222222-2222-2222-2222-222222222222", self = "11111111-1111-1111-1111-111111111111", ally = "44444444-4444-4444-4444-444444444444";
+    // GEP's player_id is not guaranteed to be Riot's PUUID: these entries can only be matched by name or by is_local.
+    var payload = System.Text.Json.JsonSerializer.Serialize(new { info = new { match_info = new Dictionary<string, object> {
+        ["match_id"] = match,
+        ["scoreboard_0"] = System.Text.Json.JsonSerializer.Serialize(new { player_id = "gep-1", name = "Me #JP1", is_local = true, kills = 4, deaths = 1, assists = 2,
+            money = 3900, ult_points = 7, ult_max = 7, alive = true, shield = 2, weapon = "TX_Hud_Rifles_Volcano", spike = true }),
+        ["scoreboard_1"] = new { player_id = "gep-2", name = "Friend #Tag", kills = 2, deaths = 3, assists = 0, alive = false }
+    }, kill = new { kills = "4", assists = "2", headshots = "3" } } });
+    var scores = LiveScoreboard.Parse(payload, match, [new LiveScoreTarget(self, "Me#JP1"), new LiveScoreTarget(ally, "friend#tag")], self);
+    Equal(2, scores.Count);
+    Equal(3900, scores[self].Money); Equal(7, scores[self].UltPoints); Equal(true, scores[self].Spike); Equal(3, scores[self].Headshots);
+    Equal(false, scores[ally].Alive); Equal(new LiveScore(2, 3, 0) { Alive = false }, scores[ally]);
+    // A name shared by two roster entries is ambiguous and is never used.
+    var ambiguous = LiveScoreboard.Parse(payload, match, [new LiveScoreTarget(self, ""), new LiveScoreTarget(ally, "Friend#Tag"), new LiveScoreTarget("x", "friend #tag")], self);
+    Equal(false, ambiguous.ContainsKey(ally)); Equal(true, ambiguous.ContainsKey(self));
+    // The kill/death counters alone fill in the local player only when the snapshot carries Riot's match ID.
+    var counters = System.Text.Json.JsonSerializer.Serialize(new { info = new { match_info = new { match_id = match }, kill = new { kills = 6, assists = 1 }, death = new { deaths = 2 } } });
+    Equal(new LiveScore(6, 2, 1), LiveScoreboard.Parse(counters, match, [self], self)[self]);
+    var countersNoId = System.Text.Json.JsonSerializer.Serialize(new { info = new { match_info = new { round_number = "3" }, kill = new { kills = 6 } } });
+    Equal(0, LiveScoreboard.Parse(countersNoId, match, [self], self).Count);
+    var state = new LiveMatchState();
+    state.ReplaceRoster(new LiveRosterMatch(match, "Ascent", "", [new LiveRosterPlayer(self, "Blue", "", false, false, null)]), self, "Me#JP1", []);
+    state.ApplyScores(scores);
+    Equal("3900", LiveMatchState.Text(state.Players["0"], "money")); Equal("true", LiveMatchState.Text(state.Players["0"], "alive"));
+    state.ApplyScores(new Dictionary<string, LiveScore>(StringComparer.OrdinalIgnoreCase) { [self] = new LiveScore(5, 1, 2) });
+    Equal("", LiveMatchState.Text(state.Players["0"], "money"));
+    state.ApplyScores(scores); state.ClearScores();
+    Equal("", LiveMatchState.Text(state.Players["0"], "weapon")); Equal("", LiveMatchState.Text(state.Players["0"], "kills"));
+    return Task.CompletedTask;
+}));
+tests.Add(("Overwolf local event bridge accepts authenticated loopback snapshots", async () => {
+    var folder = Path.Combine(Path.GetTempPath(), "SpikeSideBridge-" + Guid.NewGuid().ToString("N"));
+    var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    try {
+        using var bridge = new OverwolfEventBridge(folder, message => received.TrySetResult(message));
+        using var config = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(folder, "spikeside-overwolf-bridge.json")));
+        var port = config.RootElement.GetProperty("port").GetInt32(); var token = config.RootElement.GetProperty("token").GetString();
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+        using var response = await client.PostAsync($"http://127.0.0.1:{port}/events?token={token}", new StringContent("{\"info\":{}}", System.Text.Encoding.UTF8, "text/plain"));
+        Equal(System.Net.HttpStatusCode.NoContent, response.StatusCode); Equal("{\"info\":{}}", await received.Task.WaitAsync(TimeSpan.FromSeconds(3)));
+    } finally {
+        var path = Path.Combine(folder, "spikeside-overwolf-bridge.json"); if (File.Exists(path)) File.Delete(path);
+        if (Directory.Exists(folder)) Directory.Delete(folder);
+    }
+}));
+tests.Add(("live tracker rejects mismatched rosters and handles pregame ending during a poll", async () => {
+    var source = new FakeLiveTrackerSource { PregameId = "match", Pregame = new MatchSnapshot("wrong", "character_select_active", [new Player("self", "", "")]) };
+    try { await LiveTrackerReader.ReadAsync(source, "self", default); throw new Exception("Accepted another match"); } catch (InvalidDataException) { }
+    source.Pregame = new MatchSnapshot("match", "character_select_active", [new Player("other", "", "")]);
+    try { await LiveTrackerReader.ReadAsync(source, "self", default); throw new Exception("Accepted a roster without self"); } catch (InvalidDataException) { }
+    source.PregameNotFound = true;
+    var ended = await LiveTrackerReader.ReadAsync(source, "self", default);
+    Equal<LiveRosterMatch?>(null, ended.Game); Equal<MatchSnapshot?>(null, ended.Pregame);
+    source.CoreId = "core"; source.Game = new LiveRosterMatch("core", "Ascent", "", [new LiveRosterPlayer("other", "", "", true, true, null)]);
+    try { await LiveTrackerReader.ReadAsync(source, "self", default); throw new Exception("Accepted another core roster"); } catch (InvalidDataException) { }
+}));
+tests.Add(("live tracker reads pregame through authenticated Riot API", async () => {
+    var transport = new Transport { CoregameAvailable = false, PregameAvailable = true };
+    using var api = new RiotApi(transport);
+    await api.Login(new AuthResult("fake-access", "fake-id", now.AddHours(1)), "ap", default);
+    var snapshot = await LiveTrackerReader.ReadAsync(api, api.Subject, default);
+    Equal(true, snapshot.Pregame != null); Equal(1, snapshot.Pregame!.Allies.Count);
+    Equal(true, transport.Calls.Any(call => call.Uri.AbsolutePath.Contains("/pregame/v1/matches/") && call.Authorization == "Bearer fake-access"));
+    transport.PregameAvailable = false;
+    var idle = await LiveTrackerReader.ReadAsync(api, api.Subject, default);
+    Equal<MatchSnapshot?>(null, idle.Pregame); Equal<LiveRosterMatch?>(null, idle.Game);
 }));
 tests.Add(("live score uses only matching local in-game presence and map", () => {
     const string subject = "11111111-1111-1111-1111-111111111111";
@@ -1494,6 +1652,18 @@ sealed class Fake : IGameApi
     }
 }
 
+sealed class FakeLiveTrackerSource : ILiveTrackerSource
+{
+    public string? CoreId, PregameId;
+    public LiveRosterMatch? Game;
+    public MatchSnapshot? Pregame;
+    public bool PregameNotFound;
+    public Task<string?> GetCoreMatchId(CancellationToken ct) => Task.FromResult(CoreId);
+    public Task<LiveRosterMatch?> GetCoreLiveRoster(string matchId, CancellationToken ct) => Task.FromResult(Game);
+    public Task<string?> GetMatchId(CancellationToken ct) => Task.FromResult(PregameId);
+    public Task<MatchSnapshot> GetMatch(string matchId, CancellationToken ct) => PregameNotFound ? throw new ApiException(404) : Task.FromResult(Pregame!);
+}
+
 sealed class FakeArchiveWrite
 {
     public readonly ManualResetEventSlim Started = new(false), Release = new(false);
@@ -1542,7 +1712,7 @@ sealed class Transport : HttpMessageHandler
     public int GameStatus = 200;
     public bool PregameAvailable = true, CoregameAvailable;
     public string QueueEntryTime = "0001-01-01T00:00:00Z";
-    public string? PartyResponse, MatchResponse, OwnedAgentsResponse, HistoryResponse;
+    public string? PartyResponse, MatchResponse, OwnedAgentsResponse, HistoryResponse, NameResponse, RankResponse;
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage req, CancellationToken ct)
     {
         Calls.Add((req.RequestUri!, req.Method, req.Headers.Authorization?.ToString() ?? "", req.Headers.TryGetValues("X-Riot-Entitlements-JWT", out var headers) ? headers.Single() : ""));
@@ -1552,6 +1722,8 @@ sealed class Transport : HttpMessageHandler
             "entitlements.auth.riotgames.com" => """{"entitlements_token":"fake-entitlement"}""",
             "riot-geo.pas.si.riotgames.com" => """{"affinities":{"live":"br","pbe":"na"}}""",
             "valorant-api.com" => """{"data":{"riotClientVersion":"release-test"}}""",
+            _ when req.RequestUri.AbsolutePath == "/name-service/v2/players" => NameResponse ?? "[]",
+            _ when req.RequestUri.AbsolutePath.Contains("/competitiveupdates") => RankResponse ?? """{"Matches":[]}""",
             _ when req.RequestUri.AbsolutePath.Contains("/match-history/v1/history/") => HistoryResponse ?? """{"History":[]}""",
             _ when req.RequestUri.AbsolutePath.Contains("/store/v1/entitlements/") => OwnedAgentsResponse ?? """{"Entitlements":[]}""",
             _ when req.RequestUri.AbsolutePath.Contains("/parties/v1/players/") => """{"CurrentPartyID":"44444444-4444-4444-4444-444444444444"}""",

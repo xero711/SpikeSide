@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace ValoAutoPick;
 
-public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
+public sealed class RiotApi : IGameApi, IQueueApi, ILiveTrackerSource, IDisposable
 {
     private static readonly string ClientPlatformHeader = Convert.ToBase64String(
         Encoding.UTF8.GetBytes("{\"platformType\":\"PC\",\"platformOS\":\"Windows\",\"platformOSVersion\":\"10.0.19042.1.256.64bit\",\"platformChipset\":\"Unknown\"}"));
@@ -332,7 +332,7 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
     }
     private async Task<JsonDocument?> Request(HttpMethod method, string path, bool missingIsIdle, CancellationToken ct,
-        bool playerData = false, string? jsonBody = null, RiotSession? sessionSnapshot = null, TimeSpan? timeout = null)
+        bool playerData = false, string? jsonBody = null, RiotSession? sessionSnapshot = null, TimeSpan? timeout = null, bool invalidateOnForbidden = true)
     {
         var current = sessionSnapshot ?? CurrentSession;
         var baseUrl = playerData ? current.PlayerDataServer : current.Server;
@@ -352,7 +352,7 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         if (response.StatusCode == HttpStatusCode.NotFound && missingIsIdle) return null;
         if (!response.IsSuccessStatusCode)
         {
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) Invalidate(current);
+            if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden && invalidateOnForbidden) Invalidate(current);
             var retry = response.Headers.RetryAfter?.Delta?.TotalSeconds
                 ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow)?.TotalSeconds ?? 5;
             throw new ApiException((int)response.StatusCode, (int)Math.Ceiling(retry));
@@ -388,6 +388,15 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         EnsurePlayerDataSession(current);
         using var result = await Request(HttpMethod.Get, $"/mmr/v1/players/{current.Subject}/competitiveupdates?startIndex=0&endIndex=20&queue=competitive", false, ct, playerData: true, sessionSnapshot: current);
         return CompetitiveUpdate.Parse(result!.RootElement);
+    }
+    public async Task<LiveRecentRank?> GetPlayerRecentRank(string subject, CancellationToken ct)
+    {
+        ValidateId(subject);
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
+        using var result = await Request(HttpMethod.Get, $"/mmr/v1/players/{subject}/competitiveupdates?startIndex=0&endIndex=1&queue=competitive",
+            true, ct, playerData: true, sessionSnapshot: current, invalidateOnForbidden: false);
+        return result is null ? null : LiveRecentRank.Parse(result.RootElement);
     }
     public async Task<RiotMatchHistoryPage> GetMatchHistory(int startIndex, int pageSize, CancellationToken ct, string? queue = null)
     {

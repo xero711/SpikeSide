@@ -1,0 +1,22 @@
+{
+  "manifest_version": 1,
+  "type": "WebApp",
+  "meta": {
+    "name": "SpikeSide Live Bridge",
+    "author": "SpikeSide",
+    "version": "1.0.0",
+    "description": "Forwards VALORANT game events to SpikeSide on this PC.",
+    "icon": "icon.png",
+    "icon_gray": "icon.png",
+    "minimum-overwolf-version": "0.290.0",
+    "minimum-gep-version": "290.0"
+  },
+  "permissions": ["GameInfo", "FileSystem"],
+  "data": {
+    "start_window": "background",
+    "windows": { "background": { "file": "background.html", "is_background_page": true, "background_optimization": false } },
+    "game_events": [21640],
+    "game_targeting": { "type": "dedicated", "game_ids": [21640] },
+    "launch_events": [{ "event": "GameLaunch", "event_data": { "game_ids": [21640] }, "start_minimized": true }]
+  }
+}

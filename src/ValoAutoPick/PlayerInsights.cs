@@ -2,6 +2,29 @@ using System.Text.Json;
 
 namespace ValoAutoPick;
 
+public sealed record LiveRecentRank(int Tier, int? Rating)
+{
+    public string DisplayName => Tier switch
+    {
+        >= 0 and <= 2 => "ランクなし",
+        >= 3 and <= 26 => $"{new[] { "アイアン", "ブロンズ", "シルバー", "ゴールド", "プラチナ", "ダイヤモンド", "アセンダント", "イモータル" }[(Tier - 3) / 3]} {(Tier - 3) % 3 + 1}",
+        27 => "レディアント",
+        _ => "ランク不明"
+    };
+
+    public static LiveRecentRank? Parse(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("Matches", out var matches) ||
+            matches.ValueKind != JsonValueKind.Array || matches.GetArrayLength() == 0) return null;
+        var latest = matches[0];
+        if (latest.ValueKind != JsonValueKind.Object || !latest.TryGetProperty("TierAfterUpdate", out var tierElement) ||
+            tierElement.ValueKind != JsonValueKind.Number || !tierElement.TryGetInt32(out var tier) || tier is < 0 or > 27) return null;
+        int? rating = latest.TryGetProperty("RankedRatingAfterUpdate", out var rr) && rr.ValueKind == JsonValueKind.Number &&
+            rr.TryGetInt32(out var value) && value >= 0 ? value : null;
+        return new(tier, rating);
+    }
+}
+
 public sealed record WalletBalances(long? VP, long? RP, long? KC)
 {
     public static WalletBalances Parse(JsonElement root)
