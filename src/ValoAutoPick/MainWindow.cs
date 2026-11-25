@@ -309,7 +309,8 @@ public sealed class MainWindow : DarkForm
                     if (Environment.GetCommandLineArgs().Contains("--preview-video"))
                     {
                         await Task.Delay(700);
-                        await storePreview.PlayVideoForPreviewAsync(TimeSpan.FromSeconds(20));
+                        await storePreview.PlayVideoForPreviewAsync(TimeSpan.FromSeconds(20),
+                            expand: Environment.GetCommandLineArgs().Contains("--preview-video-fill"));
                         File.WriteAllText(Path.ChangeExtension(smokePath, ".video-result.txt"), storePreview.PreviewVideoResult);
                     }
                 }
@@ -1558,6 +1559,8 @@ public sealed class MainWindow : DarkForm
             if (target.Enabled && target.Visible) target.PerformClick();
             return true;
         }
+        if (keyData == Keys.Escape && selectedPage == MainPage.Store && storePreview?.TryExitExpandedVideo() == true)
+            return true;
         if (keyData == Keys.F5 && !closing)
         {
             if (selectedPage == MainPage.MatchHistory && matchHistory != null) { _ = matchHistory.RefreshFromShortcutAsync(); return true; }

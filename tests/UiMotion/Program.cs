@@ -100,6 +100,7 @@ internal static class Program
                 CheckStoreNavigationSpacing();
                 CheckRrChartScale();
                 CheckMainStoreSpacing();
+                await CheckExpandedCatalogVideo();
                 using (var artworkResource = assembly.GetManifestResourceStream("ValoAutoPick.Assets.SpikeSide.png"))
                 {
                     Assert(artworkResource != null, "high resolution logo is embedded");
@@ -605,6 +606,111 @@ internal static class Program
         CheckGap(search, "catalog");
         typeof(StorePreviewControl).GetMethod("ShowStorePage", flags)!.Invoke(store, null);
         CheckGap(daily, "returned store");
+    }
+
+    private static async Task CheckExpandedCatalogVideo()
+    {
+        using var main = new MainWindow(skipBackgroundWork: true) { ShowInTaskbar = false };
+        main.Show();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var showMainPage = typeof(MainWindow).GetMethod("ShowMainPage", flags)!;
+        var storePageEnum = Enum.Parse(showMainPage.GetParameters()[0].ParameterType, "Store");
+        showMainPage.Invoke(main, [storePageEnum]);
+        var store = (StorePreviewControl)typeof(MainWindow).GetField("storePreview", flags)!.GetValue(main)!;
+        typeof(StorePreviewControl).GetMethod("ShowCatalogPage", flags)!.Invoke(store, null);
+        Application.DoEvents();
+
+        var playButton = (ThemedButton)typeof(StorePreviewControl).GetField("playVideoButton", flags)!.GetValue(store)!;
+        var playbackButton = (ThemedButton)typeof(StorePreviewControl).GetField("playbackButton", flags)!.GetValue(store)!;
+        var muteButton = (ThemedButton)typeof(StorePreviewControl).GetField("muteVideoButton", flags)!.GetValue(store)!;
+        var expandButton = (ThemedButton)typeof(StorePreviewControl).GetField("expandVideoButton", flags)!.GetValue(store)!;
+        var stopButton = (ThemedButton)typeof(StorePreviewControl).GetField("stopVideoButton", flags)!.GetValue(store)!;
+        var visualHost = (Control)typeof(StorePreviewControl).GetField("visualHost", flags)!.GetValue(store)!;
+        var videoHost = (Control)typeof(StorePreviewControl).GetField("videoHost", flags)!.GetValue(store)!;
+        var mediaPlayer = (System.Windows.Controls.MediaElement)typeof(StorePreviewControl).GetField("mediaPlayer", flags)!.GetValue(store)!;
+        var overlay = (Control)typeof(StorePreviewControl).GetField("expandedVideoOverlay", flags)!.GetValue(store)!;
+        var stage = (Control)typeof(StorePreviewControl).GetField("expandedVideoStage", flags)!.GetValue(store)!;
+        var header = (Control)typeof(StorePreviewControl).GetField("expandedVideoHeader", flags)!.GetValue(store)!;
+        var collapseButton = (ThemedButton)typeof(StorePreviewControl).GetField("collapseVideoButton", flags)!.GetValue(store)!;
+        var expandedStopButton = (ThemedButton)typeof(StorePreviewControl).GetField("expandedStopButton", flags)!.GetValue(store)!;
+        var mediaBar = playButton.Parent!;
+
+        // Idle state: play and expand sit side by side inside mediaBar without overlap.
+        playButton.Tag = "https://example.invalid/preview.mp4";
+        ((Action)typeof(StorePreviewControl).GetField("resizeMediaActions", flags)!.GetValue(store)!)();
+        Assert(expandButton.Visible && expandButton.Enabled, "expand video button is visible and enabled when a video URL exists");
+        Assert(mediaBar.ClientRectangle.Contains(playButton.Bounds) && mediaBar.ClientRectangle.Contains(expandButton.Bounds) &&
+               !playButton.Bounds.IntersectsWith(expandButton.Bounds),
+            "play and expand buttons fit without overlapping in idle media bar");
+
+        // Simulated active playback: all four media bar buttons fit without overlap.
+        playButton.Visible = false;
+        playbackButton.Visible = true;
+        muteButton.Visible = true;
+        stopButton.Visible = true;
+        videoHost.Visible = true;
+        typeof(StorePreviewControl).GetMethod("UpdateVideoControls", flags)!.Invoke(store, null);
+        Assert(mediaBar.ClientRectangle.Contains(playbackButton.Bounds) && mediaBar.ClientRectangle.Contains(muteButton.Bounds) &&
+               mediaBar.ClientRectangle.Contains(expandButton.Bounds) && mediaBar.ClientRectangle.Contains(stopButton.Bounds) &&
+               !playbackButton.Bounds.IntersectsWith(muteButton.Bounds) && !muteButton.Bounds.IntersectsWith(expandButton.Bounds) &&
+               !expandButton.Bounds.IntersectsWith(stopButton.Bounds),
+            "active media bar fits playback, mute, expand, and stop buttons without overlap");
+
+        var compactWidth = visualHost.ClientSize.Width;
+        var compactHeight = visualHost.ClientSize.Height;
+
+        // Enter window-fill mode with animation: verify intermediate growth, rounded corners, and zero side bars.
+        var enterExpanded = typeof(StorePreviewControl).GetMethod("EnterExpandedVideo", flags)!;
+        enterExpanded.Invoke(store, [true]);
+        var caption = main.Controls.Cast<Control>().Single(c => c.GetType().Name == "WindowCaption");
+        Assert(overlay.Visible && overlay.Parent == main, "expanded video overlay mounts directly inside MainWindow");
+        Assert(caption.Visible && overlay.Top >= caption.Bottom, "expanded video overlay keeps the window caption visible");
+        var expectedExpandedWidth = stage.ClientSize.Width - stage.Padding.Horizontal;
+        var expectedExpandedHeight = stage.ClientSize.Height - stage.Padding.Vertical;
+        if (System.Windows.SystemParameters.ClientAreaAnimation)
+        {
+            var initialAnimWidth = videoHost.Width;
+            await Task.Delay(70);
+            var midAnimWidth = videoHost.Width;
+            Assert(midAnimWidth > initialAnimWidth && midAnimWidth < expectedExpandedWidth,
+                $"expanding video animates smoothly through intermediate sizes ({initialAnimWidth} -> {midAnimWidth} -> {expectedExpandedWidth})");
+        }
+        await Task.Delay(320);
+        Assert(videoHost.Parent == stage && stage.ClientSize.Width > compactWidth * 2 && stage.ClientSize.Height > compactHeight * 2,
+            $"expanded video stage fills the window much larger than catalog preview ({stage.ClientSize} vs {compactWidth}x{compactHeight})");
+        Assert(Math.Abs(videoHost.Width - expectedExpandedWidth) <= 2 && Math.Abs(videoHost.Height - expectedExpandedHeight) <= 2,
+            $"expanded video host fills the full padded stage without left/right bars ({videoHost.Size} vs {expectedExpandedWidth}x{expectedExpandedHeight})");
+        Assert(mediaPlayer.Stretch == System.Windows.Media.Stretch.UniformToFill,
+            "expanded video uses UniformToFill to eliminate side bars");
+        Assert(videoHost.Region != null && mediaPlayer.Clip != null,
+            "expanded video preserves rounded corners on both host and media surface");
+        Assert(header.ClientRectangle.Contains(collapseButton.Bounds) && header.ClientRectangle.Contains(expandedStopButton.Bounds) &&
+               !collapseButton.Bounds.IntersectsWith(expandedStopButton.Bounds),
+            "expanded video header buttons fit without overlapping");
+
+        // Exiting via Escape animates smoothly back, keeps video playing, and restores videoHost to visualHost.
+        var tryExit = typeof(StorePreviewControl).GetMethod("TryExitExpandedVideo", flags)!;
+        Assert((bool)tryExit.Invoke(store, null)!, "TryExitExpandedVideo starts collapsing expanded mode");
+        if (System.Windows.SystemParameters.ClientAreaAnimation)
+        {
+            await Task.Delay(70);
+            var midCollapseWidth = videoHost.Width;
+            Assert(overlay.Visible && midCollapseWidth < expectedExpandedWidth && midCollapseWidth > compactWidth,
+                $"collapsing video animates smoothly back toward catalog preview ({expectedExpandedWidth} -> {midCollapseWidth} -> {compactWidth})");
+        }
+        await Task.Delay(320);
+        Assert(!overlay.Visible && overlay.Parent == null && videoHost.Parent == visualHost && videoHost.Visible,
+            "exiting expanded mode removes the overlay and keeps the video playing in the preview panel");
+        Assert(mediaPlayer.Stretch == System.Windows.Media.Stretch.Uniform && videoHost.Region != null,
+            "collapsed preview restores Uniform stretch with rounded corners");
+        Assert(!(bool)tryExit.Invoke(store, null)!, "TryExitExpandedVideo returns false when already collapsed");
+
+        // Stopping video from expanded mode collapses immediately and returns to image preview.
+        enterExpanded.Invoke(store, [false]);
+        typeof(StorePreviewControl).GetMethod("ShowPreviewImage", flags)!.Invoke(store, null);
+        Assert(!overlay.Visible && overlay.Parent == null && !videoHost.Visible && videoHost.Parent == visualHost,
+            "returning to image preview exits expanded mode and stops video");
+        ((NotifyIcon)typeof(MainWindow).GetField("tray", flags)!.GetValue(main)!).Dispose();
     }
 
     private static void CheckStoreNavigationSpacing()

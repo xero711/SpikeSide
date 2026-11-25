@@ -51,7 +51,18 @@ public sealed class StorePreviewControl : UserControl
     private readonly ThemedButton playVideoButton = new() { Text = "▶ 再生", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, AccessibleName = "選択中スキンの動画を再生" };
     private readonly ThemedButton playbackButton = new() { Text = "⏸ 一時停止", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, Visible = false };
     private readonly ThemedButton muteVideoButton = new() { Text = "音声をオン", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, Visible = false };
+    private readonly ThemedButton expandVideoButton = new() { Text = "拡大再生", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, AccessibleName = "動画をウィンドウいっぱいに再生" };
     private readonly ThemedButton stopVideoButton = new() { Text = "画像に戻る", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true };
+    private readonly ExpandedVideoOverlay expandedVideoOverlay = new() { Dock = DockStyle.Fill, Visible = false, AccessibleName = "拡大動画プレビュー" };
+    private readonly Panel expandedVideoHeader = new() { Dock = DockStyle.Top, BackColor = Theme.Surface, Margin = Padding.Empty };
+    private readonly Panel expandedVideoHeaderBorder = new() { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Border, Margin = Padding.Empty };
+    private readonly Label expandedVideoTitle = NativePageStyle.Label("", NativePageStyle.Subheading);
+    private readonly Label expandedVideoMeta = NativePageStyle.Label("", NativePageStyle.Small, Theme.Muted);
+    private readonly Panel expandedVideoStage = new() { Dock = DockStyle.Fill, BackColor = Theme.Background, Margin = Padding.Empty };
+    private readonly ThemedButton expandedPlaybackButton = new() { Text = "⏸ 一時停止", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, Visible = false };
+    private readonly ThemedButton expandedMuteButton = new() { Text = "音声をオン", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, Visible = false };
+    private readonly ThemedButton collapseVideoButton = new() { Text = "元のサイズ", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, AccessibleName = "元のプレビューサイズに戻す" };
+    private readonly ThemedButton expandedStopButton = new() { Text = "画像に戻る", Size = new(125, UiMetrics.CompactButtonHeight), Compact = true, AccessibleName = "プレビュー画像に戻る" };
     private readonly ToolTip mediaToolTips = new() { InitialDelay = 500, ShowAlways = true };
     private readonly Label accountLabel = NativePageStyle.Label("Riotアカウント未接続", NativePageStyle.Small, Theme.Muted);
     private readonly Label skinCountLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
@@ -98,7 +109,7 @@ public sealed class StorePreviewControl : UserControl
         HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch,
         VerticalAlignment = System.Windows.VerticalAlignment.Stretch
     };
-    private readonly MediaElement mediaPlayer = new() { LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Stop, Stretch = Stretch.Uniform, IsMuted = true, Volume = .2 };
+    private readonly MediaElement mediaPlayer = new() { LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Manual, Stretch = Stretch.Uniform, IsMuted = true, Volume = .2 };
     // Loading cover drawn inside the WPF surface, above the MediaElement. A WinForms overlay cannot sit on top of the
     // ElementHost (airspace), and hiding or shrinking the host while the media opens is what froze and blurred the start.
     private readonly System.Windows.Controls.Border videoCover = new()
@@ -157,6 +168,19 @@ public sealed class StorePreviewControl : UserControl
     private TaskCompletionSource<bool>? playbackOpened;
     private Action? resizePreviewLayout;
     private Action? resizeMediaActions;
+    private Action? resizeExpandedActions;
+    private bool videoExpanded;
+    private Control? expandedOverlayHost;
+    private readonly System.Windows.Forms.Timer videoAnimTimer = new() { Interval = 16 };
+    private const int ExpandAnimationMs = 220;
+    private const int CollapseAnimationMs = 200;
+    private bool videoAnimating;
+    private bool videoAnimCollapsing;
+    private long videoAnimStartedAt;
+    private int videoAnimDurationMs;
+    private Rectangle videoAnimStart;
+    private Rectangle videoAnimTarget;
+    private Control? videoAnimControl;
     private bool catalogLoaded;
     private bool catalogTextMetricsReady;
     private bool loadingCatalog;
@@ -203,9 +227,28 @@ public sealed class StorePreviewControl : UserControl
             if (System.Windows.PresentationSource.FromVisual(videoSurface) is System.Windows.Interop.HwndSource source)
                 source.CompositionTarget.RenderMode = System.Windows.Interop.RenderMode.SoftwareOnly;
         };
+        videoSurface.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == System.Windows.Input.Key.Escape && videoExpanded)
+            {
+                e.Handled = true;
+                ExitExpandedVideo(animate: true);
+            }
+        };
+        videoSurface.MouseLeftButtonDown += (_, e) =>
+        {
+            if (e.ClickCount == 2 && videoHost.Visible && !videoOpening)
+            {
+                e.Handled = true;
+                ToggleExpandedVideo();
+            }
+        };
         videoHost.SizeChanged += (_, _) => ResizeVideoSurface();
         visualHost.SizeChanged += (_, _) => ResizeVideoSurface();
+        expandedVideoStage.SizeChanged += (_, _) => OnExpandedStageResized();
         videoHost.DpiChangedAfterParent += (_, _) => ResizeVideoSurface();
+        expandedVideoOverlay.EscapePressed += () => ExitExpandedVideo(animate: true);
+        videoAnimTimer.Tick += (_, _) => TickVideoAnimation();
         videoOpenTimer.Tick += (_, _) =>
         {
             videoOpenTimer.Stop();
@@ -275,11 +318,15 @@ public sealed class StorePreviewControl : UserControl
             if (mediaOpenedHandler is not null) mediaPlayer.MediaOpened -= mediaOpenedHandler;
             if (mediaEndedHandler is not null) mediaPlayer.MediaEnded -= mediaEndedHandler;
             StopMedia();
+            ExitExpandedVideo(animate: false);
             videoHost.Child = null;
             RoundedCorners.Release(videoHost);
+            RoundedCorners.Release(videoLoadingOverlay);
+            expandedVideoOverlay.Dispose();
             videoOpenTimer.Dispose();
             videoStartTimer.Stop(); videoStartTimer.Dispose();
             videoErrorTimer.Stop(); videoErrorTimer.Dispose();
+            videoAnimTimer.Stop(); videoAnimTimer.Dispose();
             countdownTimer.Stop(); countdownTimer.Dispose();
             mediaToolTips.Dispose();
             catalog.Dispose(); loginWindow?.Dispose();
@@ -340,13 +387,21 @@ public sealed class StorePreviewControl : UserControl
 
     internal void ShowCatalogForPreview() => ShowCatalogPage();
 
-    internal async Task<bool> PlayVideoForPreviewAsync(TimeSpan timeout)
+    internal bool TryExitExpandedVideo()
+    {
+        if (!videoExpanded || videoAnimCollapsing) return false;
+        ExitExpandedVideo(animate: true);
+        return true;
+    }
+
+    internal async Task<bool> PlayVideoForPreviewAsync(TimeSpan timeout, bool expand = false)
     {
         if (playVideoButton.Tag is not string url || string.IsNullOrWhiteSpace(url))
         {
             PreviewVideoResult = "NoVideoUrl";
             return false;
         }
+        if (expand) EnterExpandedVideo(animate: false);
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         playbackOpened = completion;
         using var timeoutStop = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -821,9 +876,10 @@ public sealed class StorePreviewControl : UserControl
         catalogMeta.AutoSize = false;
         catalogTitle.AutoEllipsis = true;
         catalogMeta.AutoEllipsis = true;
-        playVideoButton.Margin = playbackButton.Margin = muteVideoButton.Margin = stopVideoButton.Margin = Padding.Empty;
+        playVideoButton.Margin = playbackButton.Margin = muteVideoButton.Margin = expandVideoButton.Margin = stopVideoButton.Margin = Padding.Empty;
         mediaBar.Controls.Add(playVideoButton); mediaBar.Controls.Add(playbackButton);
-        mediaBar.Controls.Add(muteVideoButton); mediaBar.Controls.Add(stopVideoButton);
+        mediaBar.Controls.Add(muteVideoButton); mediaBar.Controls.Add(expandVideoButton);
+        mediaBar.Controls.Add(stopVideoButton);
         wishlistButton.Click += (_, _) => { if (selectedSkin is { } skin) ToggleWishlist(skin); };
         header.Controls.Add(catalogTitle); header.Controls.Add(catalogMeta); header.Controls.Add(wishlistButton);
         var labelFont = SharedFonts.Get("Yu Gothic UI", 11.5f, FontStyle.Bold);
@@ -848,52 +904,106 @@ public sealed class StorePreviewControl : UserControl
         {
             var width = mediaBar.ClientSize.Width;
             if (width <= 0) return;
-            var labelWidth = new[] { "▶ 再生", "⏸ 一時停止", "音声をオン", "ミュート", "画像に戻る", "キャンセル" }
-                .Max(text => TextRenderer.MeasureText(text, labelFont, Size.Empty, measureFlags).Width)
-                + UiMetrics.Px(mediaBar, UiMetrics.ControlGap) * 2;
             var s = new Func<int, int>(value => UiMetrics.Px(mediaBar, value));
+            var pad = s(UiMetrics.ControlGap) * 2;
+            int Measure(params string[] texts) =>
+                texts.Max(text => TextRenderer.MeasureText(text, labelFont, Size.Empty, measureFlags).Width) + pad;
+            var playLabelWidth = Measure("▶ 再生", "⏸ 一時停止");
+            var audioLabelWidth = Measure("音声をオン", "ミュート");
+            var expandLabelWidth = Measure("拡大再生", "拡大表示");
+            var stopLabelWidth = Measure("画像に戻る", "キャンセル");
             var iconWidth = s(35);
             var buttonHeight = s(UiMetrics.CompactButtonHeight);
             var gap = s(UiMetrics.ControlGap);
             var groupGap = s(UiMetrics.PageInset);
-            var stage0 = labelWidth * 3 + gap + groupGap;
-            var stage1 = labelWidth * 2 + iconWidth + gap + groupGap;
-            var stage2 = labelWidth + iconWidth * 2 + gap + groupGap;
-            var iconStage = width >= stage0 ? 0 : width >= stage1 ? 1 : width >= stage2 ? 2 : 3;
-            var playbackIcon = iconStage >= 2;
-            var audioIcon = iconStage >= 1;
-            var stopIcon = iconStage >= 3;
+            var y = Math.Max(0, (mediaBar.ClientSize.Height - buttonHeight) / 2);
+
             var playAction = "選択中スキンの動画を再生";
             var playbackAction = videoPaused ? "動画を再生" : "動画を一時停止";
             var audioAction = mediaPlayer.IsMuted ? "動画の音声をオン" : "動画をミュート";
             var cancelingVideo = videoOpening || videoLoad is { IsCancellationRequested: false };
             var stopAction = cancelingVideo ? "動画の読み込みをキャンセル" : "プレビュー画像に戻る";
+            var videoActive = videoHost.Visible || cancelingVideo;
+            var expandText = videoActive ? "拡大表示" : "拡大再生";
+            var expandAction = videoActive ? "動画をウィンドウいっぱいに拡大表示" : "動画をウィンドウいっぱいに再生";
+            var hasVideo = !string.IsNullOrWhiteSpace(playVideoButton.Tag as string);
+            playVideoButton.Enabled = hasVideo;
+            expandVideoButton.Enabled = videoActive || hasVideo;
+
+            bool playbackIcon;
+            bool audioIcon;
+            bool expandIcon;
+            bool stopIcon;
+            if (!videoActive)
+            {
+                expandIcon = width < playLabelWidth + gap + expandLabelWidth;
+                playbackIcon = width < playLabelWidth + gap + iconWidth;
+                audioIcon = false;
+                stopIcon = false;
+            }
+            else if (cancelingVideo)
+            {
+                expandIcon = width < expandLabelWidth + groupGap + stopLabelWidth;
+                stopIcon = width < iconWidth + groupGap + stopLabelWidth;
+                playbackIcon = false;
+                audioIcon = false;
+            }
+            else
+            {
+                var stage0 = playLabelWidth + gap + audioLabelWidth + groupGap + expandLabelWidth + gap + stopLabelWidth;
+                var stage1 = playLabelWidth + gap + audioLabelWidth + groupGap + iconWidth + gap + stopLabelWidth;
+                var stage2 = playLabelWidth + gap + iconWidth + groupGap + iconWidth + gap + stopLabelWidth;
+                var stage3 = iconWidth + gap + iconWidth + groupGap + iconWidth + gap + stopLabelWidth;
+                var iconStage = width >= stage0 ? 0 : width >= stage1 ? 1 : width >= stage2 ? 2 : width >= stage3 ? 3 : 4;
+                expandIcon = iconStage >= 1;
+                audioIcon = iconStage >= 2;
+                playbackIcon = iconStage >= 3;
+                stopIcon = iconStage >= 4;
+            }
+
             ApplyMediaButton(playVideoButton, playbackIcon, "\uE768", "▶ 再生", playAction, playAction);
             ApplyMediaButton(playbackButton, playbackIcon, videoPaused ? "\uE768" : "\uE769", videoPaused ? "▶ 再生" : "⏸ 一時停止", playbackAction, playbackAction);
             ApplyMediaButton(muteVideoButton, audioIcon, mediaPlayer.IsMuted ? "\uE767" : "\uE74F", mediaPlayer.IsMuted ? "音声をオン" : "ミュート", audioAction, audioAction);
+            ApplyMediaButton(expandVideoButton, expandIcon, "\uE740", expandText, expandAction, expandAction);
             ApplyMediaButton(stopVideoButton, stopIcon, cancelingVideo ? "\uE711" : "\uE91B", cancelingVideo ? "キャンセル" : "画像に戻る", stopAction, stopAction);
-            playVideoButton.Enabled = !string.IsNullOrWhiteSpace(playVideoButton.Tag as string);
 
-            var playWidth = playbackIcon ? iconWidth : labelWidth;
-            var audioWidth = audioIcon ? iconWidth : labelWidth;
-            var stopWidth = stopIcon ? iconWidth : labelWidth;
+            var playWidth = playbackIcon ? iconWidth : playLabelWidth;
+            var audioWidth = audioIcon ? iconWidth : audioLabelWidth;
+            var expandWidth = expandIcon ? iconWidth : expandLabelWidth;
+            var stopWidth = stopIcon ? iconWidth : stopLabelWidth;
             const int left = 0;
-            var y = Math.Max(0, (mediaBar.ClientSize.Height - buttonHeight) / 2);
             playVideoButton.Bounds = new Rectangle(left, y, playWidth, buttonHeight);
             playbackButton.Bounds = playVideoButton.Bounds;
             muteVideoButton.Bounds = new Rectangle(left + playWidth + gap, y, audioWidth, buttonHeight);
-            var stopLeft = Math.Max(left + playWidth + gap + audioWidth + groupGap, width - stopWidth);
-            stopVideoButton.Bounds = new Rectangle(stopLeft, y, stopWidth, buttonHeight);
+            if (!videoActive)
+            {
+                expandVideoButton.Bounds = new Rectangle(playVideoButton.Right + gap, y, expandWidth, buttonHeight);
+                stopVideoButton.Bounds = new Rectangle(Math.Max(expandVideoButton.Right + gap, width - stopWidth), y, stopWidth, buttonHeight);
+            }
+            else if (cancelingVideo)
+            {
+                expandVideoButton.Bounds = new Rectangle(left, y, expandWidth, buttonHeight);
+                stopVideoButton.Bounds = new Rectangle(Math.Max(expandVideoButton.Right + groupGap, width - stopWidth), y, stopWidth, buttonHeight);
+            }
+            else
+            {
+                var rightGroupWidth = expandWidth + gap + stopWidth;
+                var rightGroupLeft = Math.Max(muteVideoButton.Right + groupGap, width - rightGroupWidth);
+                expandVideoButton.Bounds = new Rectangle(rightGroupLeft, y, expandWidth, buttonHeight);
+                stopVideoButton.Bounds = new Rectangle(expandVideoButton.Right + gap, y, stopWidth, buttonHeight);
+            }
         }
         header.Resize += (_, _) => PlaceHeader();
         mediaBar.Resize += (_, _) => PlaceMediaActions();
         playVideoButton.VisibleChanged += (_, _) => PlaceMediaActions();
         playbackButton.VisibleChanged += (_, _) => PlaceMediaActions();
         muteVideoButton.VisibleChanged += (_, _) => PlaceMediaActions();
+        expandVideoButton.VisibleChanged += (_, _) => PlaceMediaActions();
         stopVideoButton.VisibleChanged += (_, _) => PlaceMediaActions();
         header.DpiChangedAfterParent += (_, _) => PlaceHeader();
         mediaBar.DpiChangedAfterParent += (_, _) => PlaceMediaActions();
         resizeMediaActions = PlaceMediaActions;
+        BuildExpandedVideoOverlay(ApplyMediaButton, labelFont, measureFlags);
         PlaceHeader();
         PlaceMediaActions();
         visualHost.Dock = DockStyle.Fill;
@@ -988,7 +1098,12 @@ public sealed class StorePreviewControl : UserControl
         playVideoButton.Click += async (_, _) => await PlayPreviewVideoAsync(lifetime.Token);
         playbackButton.Click += (_, _) => ToggleVideoPlayback();
         muteVideoButton.Click += (_, _) => ToggleVideoMute();
+        expandVideoButton.Click += async (_, _) => await ExpandVideoAsync();
         stopVideoButton.Click += (_, _) => ShowPreviewImage();
+        expandedPlaybackButton.Click += (_, _) => ToggleVideoPlayback();
+        expandedMuteButton.Click += (_, _) => ToggleVideoMute();
+        collapseVideoButton.Click += (_, _) => ExitExpandedVideo(animate: true);
+        expandedStopButton.Click += (_, _) => ShowPreviewImage();
         VisibleChanged += (_, _) =>
         {
             if (Visible)
@@ -1730,6 +1845,8 @@ public sealed class StorePreviewControl : UserControl
             playVideoButton.Tag = null;
             playVideoButton.Visible = true;
             playVideoButton.Enabled = false;
+            expandVideoButton.Visible = true;
+            expandVideoButton.Enabled = false;
             DisposeFlowChildren(chromaOptions); DisposeFlowChildren(levelOptions);
             resizeMediaActions?.Invoke();
             return;
@@ -1750,6 +1867,8 @@ public sealed class StorePreviewControl : UserControl
         playVideoButton.Tag = video;
         playVideoButton.Visible = true;
         playVideoButton.Enabled = !string.IsNullOrWhiteSpace(video);
+        expandVideoButton.Visible = true;
+        expandVideoButton.Enabled = !string.IsNullOrWhiteSpace(video);
         stopVideoButton.Visible = videoHost.Visible;
         resizeMediaActions?.Invoke();
     }
@@ -2063,6 +2182,7 @@ public sealed class StorePreviewControl : UserControl
         videoLoad?.Cancel();
         var operation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, externalToken);
         videoLoad = operation;
+        AttachVideoControls(ActiveVideoContainer);
         videoLoadingOverlay.Loading = true;
         videoLoadingOverlay.LoadingMessage = "動画を取得しています…";
         previewImage.Visible = false;
@@ -2072,6 +2192,7 @@ public sealed class StorePreviewControl : UserControl
         stopVideoButton.Text = "キャンセル";
         stopVideoButton.Invalidate();
         stopVideoButton.Visible = true;
+        UpdateVideoControls();
         try
         {
             var downloadProgress = new Progress<(long Received, long? Total)>(progress =>
@@ -2102,9 +2223,18 @@ public sealed class StorePreviewControl : UserControl
             // surface: the start froze, sometimes stayed black, or stayed blurry after the host grew. The WPF
             // cover hides the surface until playback has actually started.
             videoCover.Visibility = System.Windows.Visibility.Visible;
+            var handoffBounds = videoAnimating && ReferenceEquals(videoAnimControl, videoLoadingOverlay) ? videoLoadingOverlay.Bounds : (Rectangle?)null;
             videoLoadingOverlay.Loading = false;
             videoLoadingOverlay.Visible = false;
-            RestoreVideoHost(visible: true);
+            AttachVideoControls(ActiveVideoContainer);
+            if (handoffBounds is { } activeBounds)
+            {
+                videoAnimControl = videoHost;
+                videoHost.Dock = DockStyle.None;
+                videoHost.Bounds = activeBounds;
+                videoHost.Visible = true;
+            }
+            else RestoreVideoHost(visible: true);
             videoHost.BringToFront();
             ResizeVideoSurface();
             videoSurface.UpdateLayout();
@@ -2140,6 +2270,7 @@ public sealed class StorePreviewControl : UserControl
     {
         ClearVideoError();
         StopMedia();
+        ExitExpandedVideo(animate: false);
         videoPaused = false;
         videoLoadingOverlay.Loading = false;
         videoLoadingOverlay.Visible = false;
@@ -2151,9 +2282,15 @@ public sealed class StorePreviewControl : UserControl
         stopVideoButton.Visible = false;
         playbackButton.Visible = false;
         muteVideoButton.Visible = false;
+        expandedPlaybackButton.Visible = false;
+        expandedMuteButton.Visible = false;
         playVideoButton.Visible = true;
-        playVideoButton.Enabled = !string.IsNullOrWhiteSpace(playVideoButton.Tag as string);
+        var hasVideo = !string.IsNullOrWhiteSpace(playVideoButton.Tag as string);
+        playVideoButton.Enabled = hasVideo;
+        expandVideoButton.Visible = true;
+        expandVideoButton.Enabled = hasVideo;
         resizeMediaActions?.Invoke();
+        resizeExpandedActions?.Invoke();
     }
 
     private void ToggleVideoPlayback()
@@ -2178,7 +2315,435 @@ public sealed class StorePreviewControl : UserControl
         playbackButton.AccessibleName = videoPaused ? "動画を再生" : "動画を一時停止";
         muteVideoButton.Text = "音声";
         muteVideoButton.AccessibleName = mediaPlayer.IsMuted ? "動画の音声をオン" : "動画をミュート";
+        var canControlPlayback = videoHost.Visible && !videoOpening;
+        expandedPlaybackButton.Visible = canControlPlayback;
+        expandedMuteButton.Visible = canControlPlayback;
         resizeMediaActions?.Invoke();
+        resizeExpandedActions?.Invoke();
+    }
+
+    private Control ActiveVideoContainer => videoExpanded ? expandedVideoStage : visualHost;
+
+    private async Task ExpandVideoAsync()
+    {
+        if (IsDisposed || Disposing) return;
+        if (videoExpanded) { ExitExpandedVideo(animate: true); return; }
+        if (videoHost.Visible || videoOpening || videoLoad is { IsCancellationRequested: false })
+        {
+            EnterExpandedVideo(animate: true);
+            return;
+        }
+        if (playVideoButton.Tag is not string url || string.IsNullOrWhiteSpace(url)) return;
+        EnterExpandedVideo(animate: true);
+        await PlayPreviewVideoAsync(lifetime.Token);
+    }
+
+    private void ToggleExpandedVideo()
+    {
+        if (videoExpanded) ExitExpandedVideo(animate: true);
+        else if (videoHost.Visible || videoOpening || videoLoad is { IsCancellationRequested: false }) EnterExpandedVideo(animate: true);
+    }
+
+    private void EnterExpandedVideo(bool animate = true)
+    {
+        if (IsDisposed || Disposing || expandedVideoOverlay.IsDisposed) return;
+        if (videoExpanded)
+        {
+            if (videoAnimCollapsing && videoAnimControl is { IsDisposed: false } active)
+            {
+                var current = active.Bounds;
+                StopVideoAnimation(completePendingCollapse: false);
+                StartVideoAnimation(active, current, TargetVideoBounds(expandedVideoStage), ExpandAnimationMs, collapsing: false);
+            }
+            return;
+        }
+        var host = FindForm() ?? (Control)this;
+        if (host.IsDisposed) return;
+
+        var startRectInVisual = videoHost.Visible && videoHost.Parent == visualHost && videoHost.Width >= 2 && videoHost.Height >= 2
+            ? videoHost.Bounds
+            : TargetVideoBounds(visualHost);
+        var startScreenRect = visualHost.IsHandleCreated ? visualHost.RectangleToScreen(startRectInVisual) : Rectangle.Empty;
+
+        videoExpanded = true;
+        expandedOverlayHost = host;
+        ApplyExpandedOverlayTheme();
+        UpdateExpandedVideoHeading();
+        if (expandedVideoOverlay.Parent != host)
+            host.Controls.Add(expandedVideoOverlay);
+        expandedVideoOverlay.Dock = DockStyle.Fill;
+        expandedVideoOverlay.Visible = true;
+        expandedVideoOverlay.BringToFront();
+        host.PerformLayout();
+        expandedVideoOverlay.PerformLayout();
+
+        AttachVideoControls(expandedVideoStage);
+        UpdateVideoControls();
+
+        var targetRect = TargetVideoBounds(expandedVideoStage);
+        var animatedControl = videoHost.Visible ? (Control)videoHost : videoLoadingOverlay;
+        if (animate && !startScreenRect.IsEmpty && expandedVideoStage.IsHandleCreated)
+        {
+            var startRect = expandedVideoStage.RectangleToClient(startScreenRect);
+            StartVideoAnimation(animatedControl, startRect, targetRect, ExpandAnimationMs, collapsing: false);
+        }
+        else
+        {
+            StopVideoAnimation(completePendingCollapse: false);
+            LayoutExpandedVideoControls();
+        }
+        if (collapseVideoButton.CanFocus) collapseVideoButton.Focus();
+    }
+
+    private void ExitExpandedVideo(bool animate = true)
+    {
+        if (!videoExpanded) return;
+        if (!animate || disposingStore || IsDisposed || Disposing ||
+            !System.Windows.SystemParameters.ClientAreaAnimation ||
+            visualHost.IsDisposed || !visualHost.IsHandleCreated || !expandedVideoStage.IsHandleCreated)
+        {
+            StopVideoAnimation(completePendingCollapse: false);
+            FinishExitExpandedVideo();
+            return;
+        }
+        if (videoAnimCollapsing) return;
+
+        var activeControl = videoHost.Visible ? (Control)videoHost : videoLoadingOverlay.Visible ? videoLoadingOverlay : null;
+        if (activeControl is null || activeControl.Parent != expandedVideoStage || activeControl.Width < 2 || activeControl.Height < 2)
+        {
+            StopVideoAnimation(completePendingCollapse: false);
+            FinishExitExpandedVideo();
+            return;
+        }
+
+        var startRect = activeControl.Bounds;
+        var destInVisual = TargetVideoBounds(visualHost);
+        var endRect = expandedVideoStage.RectangleToClient(visualHost.RectangleToScreen(destInVisual));
+        StopVideoAnimation(completePendingCollapse: false);
+        StartVideoAnimation(activeControl, startRect, endRect, CollapseAnimationMs, collapsing: true);
+    }
+
+    private void FinishExitExpandedVideo()
+    {
+        if (!videoExpanded) return;
+        videoExpanded = false;
+        if (!visualHost.IsDisposed)
+            AttachVideoControls(visualHost);
+        if (!expandedVideoOverlay.IsDisposed)
+        {
+            expandedVideoOverlay.Visible = false;
+            if (expandedOverlayHost is { IsDisposed: false } host && expandedVideoOverlay.Parent == host)
+                host.Controls.Remove(expandedVideoOverlay);
+        }
+        expandedOverlayHost = null;
+        if (!videoLoadingOverlay.IsDisposed)
+        {
+            RoundedCorners.Release(videoLoadingOverlay);
+            videoLoadingOverlay.Dock = DockStyle.Fill;
+        }
+        if (!previewImage.IsDisposed && previewImage.Visible)
+            previewImage.BringToFront();
+        if (!IsDisposed && !Disposing)
+        {
+            UpdateVideoControls();
+            ResizeVideoSurface();
+        }
+    }
+
+    private void StartVideoAnimation(Control control, Rectangle from, Rectangle to, int durationMs, bool collapsing)
+    {
+        if (!System.Windows.SystemParameters.ClientAreaAnimation || from == to || from.Width < 2 || from.Height < 2 || to.Width < 2 || to.Height < 2)
+        {
+            StopVideoAnimation(completePendingCollapse: false);
+            if (collapsing) FinishExitExpandedVideo();
+            else LayoutExpandedVideoControls();
+            return;
+        }
+        videoAnimControl = control;
+        videoAnimStart = from;
+        videoAnimTarget = to;
+        videoAnimDurationMs = Math.Max(1, durationMs);
+        videoAnimCollapsing = collapsing;
+        videoAnimating = true;
+        videoAnimStartedAt = Environment.TickCount64;
+        ApplyAnimatedBounds(control, from);
+        videoAnimTimer.Start();
+    }
+
+    private void StopVideoAnimation(bool completePendingCollapse)
+    {
+        var wasCollapsing = videoAnimCollapsing;
+        videoAnimTimer.Stop();
+        videoAnimating = false;
+        videoAnimCollapsing = false;
+        videoAnimControl = null;
+        if (completePendingCollapse && wasCollapsing)
+            FinishExitExpandedVideo();
+    }
+
+    private void TickVideoAnimation()
+    {
+        if (disposingStore || IsDisposed || Disposing || !videoAnimating || videoAnimControl is null || videoAnimControl.IsDisposed)
+        {
+            StopVideoAnimation(completePendingCollapse: false);
+            return;
+        }
+        if (!videoAnimCollapsing)
+            videoAnimTarget = TargetVideoBounds(expandedVideoStage);
+        else if (!visualHost.IsDisposed && visualHost.IsHandleCreated && !expandedVideoStage.IsDisposed && expandedVideoStage.IsHandleCreated)
+            videoAnimTarget = expandedVideoStage.RectangleToClient(visualHost.RectangleToScreen(TargetVideoBounds(visualHost)));
+
+        var progress = Math.Clamp((Environment.TickCount64 - videoAnimStartedAt) / (float)videoAnimDurationMs, 0f, 1f);
+        var nextBounds = LerpRect(videoAnimStart, videoAnimTarget, EaseOutCubic(progress));
+        ApplyAnimatedBounds(videoAnimControl, nextBounds);
+
+        if (progress >= 1f)
+        {
+            var wasCollapsing = videoAnimCollapsing;
+            StopVideoAnimation(completePendingCollapse: false);
+            if (wasCollapsing) FinishExitExpandedVideo();
+            else LayoutExpandedVideoControls();
+        }
+    }
+
+    private void ApplyAnimatedBounds(Control control, Rectangle bounds)
+    {
+        if (control.Dock != DockStyle.None) control.Dock = DockStyle.None;
+        if (control.Bounds != bounds) control.Bounds = bounds;
+        if (ReferenceEquals(control, videoHost))
+            ResizeVideoSurface();
+        else if (ReferenceEquals(control, videoLoadingOverlay) && videoLoadingOverlay.Width > 1 && videoLoadingOverlay.Height > 1)
+            RoundedCorners.Apply(videoLoadingOverlay, UiMetrics.Px(videoLoadingOverlay, UiMetrics.CornerRadius));
+    }
+
+    private static float EaseOutCubic(float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        var inv = 1f - t;
+        return 1f - inv * inv * inv;
+    }
+
+    private static Rectangle LerpRect(Rectangle from, Rectangle to, float t)
+    {
+        static int Lerp(int a, int b, float amount) => (int)Math.Round(a + (b - a) * amount);
+        return new Rectangle(
+            Lerp(from.X, to.X, t),
+            Lerp(from.Y, to.Y, t),
+            Math.Max(2, Lerp(from.Width, to.Width, t)),
+            Math.Max(2, Lerp(from.Height, to.Height, t)));
+    }
+
+    private void OnExpandedStageResized()
+    {
+        if (!videoExpanded || videoAnimating) return;
+        LayoutExpandedVideoControls();
+    }
+
+    private void LayoutExpandedVideoControls()
+    {
+        if (!videoExpanded || expandedVideoStage.IsDisposed) return;
+        var bounds = TargetVideoBounds(expandedVideoStage);
+        if (videoHost.Visible && videoHost.Parent == expandedVideoStage)
+        {
+            if (videoHost.Dock != DockStyle.None) videoHost.Dock = DockStyle.None;
+            if (videoHost.Bounds != bounds) videoHost.Bounds = bounds;
+            ResizeVideoSurface();
+        }
+        if (videoLoadingOverlay.Parent == expandedVideoStage)
+        {
+            if (videoLoadingOverlay.Dock != DockStyle.None) videoLoadingOverlay.Dock = DockStyle.None;
+            if (videoLoadingOverlay.Bounds != bounds) videoLoadingOverlay.Bounds = bounds;
+            if (videoLoadingOverlay.Width > 1 && videoLoadingOverlay.Height > 1)
+                RoundedCorners.Apply(videoLoadingOverlay, UiMetrics.Px(videoLoadingOverlay, UiMetrics.CornerRadius));
+        }
+    }
+
+    private Rectangle TargetVideoBounds(Control container)
+    {
+        var area = container.ClientRectangle;
+        if (ReferenceEquals(container, expandedVideoStage))
+        {
+            var pad = container.Padding;
+            var padded = Rectangle.FromLTRB(
+                area.Left + pad.Left,
+                area.Top + pad.Top,
+                area.Right - pad.Right,
+                area.Bottom - pad.Bottom);
+            return padded.Width >= 2 && padded.Height >= 2 ? padded : area;
+        }
+        if (mediaPlayer.NaturalVideoWidth > 0 && mediaPlayer.NaturalVideoHeight > 0 && area.Width >= 2 && area.Height >= 2)
+        {
+            var fit = Math.Min(area.Width / (double)mediaPlayer.NaturalVideoWidth, area.Height / (double)mediaPlayer.NaturalVideoHeight);
+            var width = Math.Max(1, (int)Math.Floor(mediaPlayer.NaturalVideoWidth * fit));
+            var height = Math.Max(1, (int)Math.Floor(mediaPlayer.NaturalVideoHeight * fit));
+            return new Rectangle(area.X + (area.Width - width) / 2, area.Y + (area.Height - height) / 2, width, height);
+        }
+        return area;
+    }
+
+    private void AttachVideoControls(Control target)
+    {
+        if (target.IsDisposed || videoHost.IsDisposed || videoLoadingOverlay.IsDisposed) return;
+        var wasPlaying = videoHost.Visible && !videoOpening && !videoPaused && videoSource is not null;
+        var position = wasPlaying ? mediaPlayer.Position : (TimeSpan?)null;
+        if (videoHost.Parent != target)
+            target.Controls.Add(videoHost);
+        if (videoLoadingOverlay.Parent != target)
+            target.Controls.Add(videoLoadingOverlay);
+        if (videoLoadingOverlay.Visible) videoLoadingOverlay.BringToFront();
+        else if (videoHost.Visible) videoHost.BringToFront();
+        if (!videoAnimating)
+        {
+            if (ReferenceEquals(target, expandedVideoStage))
+                LayoutExpandedVideoControls();
+            else
+            {
+                RoundedCorners.Release(videoLoadingOverlay);
+                videoLoadingOverlay.Dock = DockStyle.Fill;
+                if (videoHost.Visible)
+                {
+                    if (videoOpening || mediaPlayer.NaturalVideoWidth <= 0 || mediaPlayer.NaturalVideoHeight <= 0)
+                        RestoreVideoHost(visible: true);
+                    ResizeVideoSurface();
+                }
+            }
+        }
+        if (videoHost.Visible)
+        {
+            videoSurface.UpdateLayout();
+            if (wasPlaying)
+            {
+                if (position is { } pos && pos > TimeSpan.Zero && mediaPlayer.Position == TimeSpan.Zero)
+                    mediaPlayer.Position = pos;
+                mediaPlayer.Play();
+            }
+        }
+    }
+
+    private void BuildExpandedVideoOverlay(Action<ThemedButton, bool, string, string, string, string> applyMediaButton, Font labelFont, TextFormatFlags measureFlags)
+    {
+        expandedVideoOverlay.BackColor = Theme.Background;
+        expandedVideoTitle.AutoSize = false;
+        expandedVideoTitle.AutoEllipsis = true;
+        expandedVideoMeta.AutoSize = false;
+        expandedVideoMeta.AutoEllipsis = true;
+        expandedPlaybackButton.Margin = expandedMuteButton.Margin = collapseVideoButton.Margin = expandedStopButton.Margin = Padding.Empty;
+        expandedVideoHeader.Controls.Add(expandedVideoTitle);
+        expandedVideoHeader.Controls.Add(expandedVideoMeta);
+        expandedVideoHeader.Controls.Add(expandedPlaybackButton);
+        expandedVideoHeader.Controls.Add(expandedMuteButton);
+        expandedVideoHeader.Controls.Add(collapseVideoButton);
+        expandedVideoHeader.Controls.Add(expandedStopButton);
+        expandedVideoHeader.Controls.Add(expandedVideoHeaderBorder);
+        // Add Fill stage before Top header so WinForms reserves the top bar first.
+        expandedVideoOverlay.Controls.Add(expandedVideoStage);
+        expandedVideoOverlay.Controls.Add(expandedVideoHeader);
+
+        void PlaceExpandedHeader()
+        {
+            var width = expandedVideoHeader.ClientSize.Width;
+            var s = new Func<int, int>(value => UiMetrics.Px(expandedVideoHeader, value));
+            var padX = s(UiMetrics.ContentGap);
+            var padY = s(UiMetrics.TightGap);
+            var gap = s(UiMetrics.ControlGap);
+            var buttonHeight = s(UiMetrics.CompactButtonHeight);
+            var titleHeight = NativePageStyle.TextHeight(expandedVideoHeader, expandedVideoTitle.Font, verticalPadding: 2);
+            var metaHeight = NativePageStyle.TextHeight(expandedVideoHeader, expandedVideoMeta.Font, verticalPadding: 2);
+            var headerHeight = Math.Max(buttonHeight + padY * 2, titleHeight + padY * 2) + 1;
+            if (expandedVideoHeader.Height != headerHeight)
+                expandedVideoHeader.Height = headerHeight;
+            var stagePadding = new Padding(s(UiMetrics.ContentGap), s(UiMetrics.ControlGap), s(UiMetrics.ContentGap), s(UiMetrics.ContentGap));
+            if (expandedVideoStage.Padding != stagePadding)
+                expandedVideoStage.Padding = stagePadding;
+            if (width <= 0) return;
+
+            var pad = gap * 2;
+            int Measure(params string[] texts) =>
+                texts.Max(text => TextRenderer.MeasureText(text, labelFont, Size.Empty, measureFlags).Width) + pad;
+            var iconWidth = s(35);
+            var playbackAction = videoPaused ? "動画を再生" : "動画を一時停止";
+            var audioAction = mediaPlayer.IsMuted ? "動画の音声をオン" : "動画をミュート";
+            var cancelingVideo = videoOpening || videoLoad is { IsCancellationRequested: false };
+            var stopAction = cancelingVideo ? "動画の読み込みをキャンセル" : "プレビュー画像に戻る";
+            const string collapseAction = "元のプレビューサイズに戻す (Esc)";
+
+            var visibleButtons = new List<(ThemedButton Button, string Glyph, string Text, string Action, int LabelWidth)>();
+            if (expandedPlaybackButton.Visible)
+                visibleButtons.Add((expandedPlaybackButton, videoPaused ? "\uE768" : "\uE769", videoPaused ? "▶ 再生" : "⏸ 一時停止", playbackAction, Measure("▶ 再生", "⏸ 一時停止")));
+            if (expandedMuteButton.Visible)
+                visibleButtons.Add((expandedMuteButton, mediaPlayer.IsMuted ? "\uE767" : "\uE74F", mediaPlayer.IsMuted ? "音声をオン" : "ミュート", audioAction, Measure("音声をオン", "ミュート")));
+            visibleButtons.Add((collapseVideoButton, "\uE73F", "元のサイズ", collapseAction, Measure("元のサイズ")));
+            visibleButtons.Add((expandedStopButton, cancelingVideo ? "\uE711" : "\uE91B", cancelingVideo ? "キャンセル" : "画像に戻る", stopAction, Measure("画像に戻る", "キャンセル")));
+
+            var minTitleSpace = s(180);
+            var availableForActions = Math.Max(0, width - padX * 2 - minTitleSpace);
+            var totalLabelWidth = visibleButtons.Sum(item => item.LabelWidth) + Math.Max(0, visibleButtons.Count - 1) * gap;
+            var iconOnly = totalLabelWidth > availableForActions;
+            var totalActionsWidth = visibleButtons.Sum(item => iconOnly ? iconWidth : item.LabelWidth) + Math.Max(0, visibleButtons.Count - 1) * gap;
+            var buttonY = Math.Max(0, (headerHeight - 1 - buttonHeight) / 2);
+            var x = Math.Max(padX, width - padX - totalActionsWidth);
+            foreach (var item in visibleButtons)
+            {
+                applyMediaButton(item.Button, iconOnly, item.Glyph, item.Text, item.Action, item.Action);
+                var itemWidth = iconOnly ? iconWidth : item.LabelWidth;
+                item.Button.Bounds = new Rectangle(x, buttonY, itemWidth, buttonHeight);
+                x += itemWidth + gap;
+            }
+
+            var textWidth = Math.Max(0, width - padX - totalActionsWidth - s(UiMetrics.ContentGap) - padX);
+            var titleY = Math.Max(0, (headerHeight - 1 - titleHeight) / 2);
+            var metaY = Math.Max(0, (headerHeight - 1 - metaHeight) / 2);
+            var measuredTitle = string.IsNullOrEmpty(expandedVideoTitle.Text)
+                ? 0 : TextRenderer.MeasureText(expandedVideoTitle.Text, expandedVideoTitle.Font, Size.Empty, measureFlags).Width + s(12);
+            var hasMeta = !string.IsNullOrEmpty(expandedVideoMeta.Text);
+            if (hasMeta && textWidth - measuredTitle >= s(120))
+            {
+                expandedVideoTitle.Bounds = new Rectangle(padX, titleY, measuredTitle, titleHeight);
+                expandedVideoMeta.Bounds = new Rectangle(padX + measuredTitle, metaY, textWidth - measuredTitle, metaHeight);
+                expandedVideoMeta.Visible = true;
+            }
+            else
+            {
+                expandedVideoTitle.Bounds = new Rectangle(padX, titleY, textWidth, titleHeight);
+                expandedVideoMeta.Visible = false;
+            }
+        }
+
+        expandedVideoHeader.Resize += (_, _) => PlaceExpandedHeader();
+        expandedVideoHeader.DpiChangedAfterParent += (_, _) => PlaceExpandedHeader();
+        expandedPlaybackButton.VisibleChanged += (_, _) => PlaceExpandedHeader();
+        expandedMuteButton.VisibleChanged += (_, _) => PlaceExpandedHeader();
+        resizeExpandedActions = PlaceExpandedHeader;
+        PlaceExpandedHeader();
+    }
+
+    private void ApplyExpandedOverlayTheme()
+    {
+        expandedVideoOverlay.BackColor = Theme.Background;
+        expandedVideoStage.BackColor = Theme.Background;
+        expandedVideoHeader.BackColor = Theme.Surface;
+        expandedVideoHeaderBorder.BackColor = Theme.Border;
+        expandedVideoTitle.ForeColor = Theme.Text;
+        expandedVideoMeta.ForeColor = Theme.Muted;
+        foreach (var button in new[] { expandedPlaybackButton, expandedMuteButton, collapseVideoButton, expandedStopButton })
+            button.Invalidate();
+    }
+
+    private void UpdateExpandedVideoHeading()
+    {
+        if (selectedSkin is not { } skin)
+        {
+            expandedVideoTitle.Text = "";
+            expandedVideoMeta.Text = "";
+            return;
+        }
+        expandedVideoTitle.Text = skin.Name;
+        var parts = new List<string> { skin.Weapon, skin.Tier };
+        if (selectedChroma >= 0 && selectedChroma < skin.Chromas.Count)
+            parts.Add(VariantLabel(skin.Name, skin.Chromas[selectedChroma].Name, "カラー", selectedChroma));
+        if (selectedLevel >= 0 && selectedLevel < skin.Levels.Count)
+            parts.Add(VariantLabel(skin.Name, skin.Levels[selectedLevel].Name, "レベル", selectedLevel));
+        expandedVideoMeta.Text = string.Join("  ·  ", parts.Where(part => !string.IsNullOrWhiteSpace(part)));
     }
 
     private void StopMedia()
@@ -2274,20 +2839,24 @@ public sealed class StorePreviewControl : UserControl
     {
         if (resizingVideo || videoHost.IsDisposed) return;
         resizingVideo = true;
-        try { FitVideoHost(); ResizeVideoContent(); }
+        try
+        {
+            if (!videoAnimating) FitVideoHost();
+            ResizeVideoContent();
+        }
         finally { resizingVideo = false; }
     }
 
-    // Once the picture size is known, shrink the host to the picture's aspect ratio and center it, so there are no
-    // letterbox bands above and below the video. Until then (the loading cover) the host fills the preview area.
+    // Once the picture size is known, shrink the host to the picture's aspect ratio and center it in the preview panel
+    // so there are no letterbox bands. In expanded mode, fill the padded window stage edge-to-edge with no side bars.
     private void FitVideoHost()
     {
-        var area = visualHost.ClientRectangle;
-        if (!videoHost.Visible || mediaPlayer.NaturalVideoWidth <= 0 || mediaPlayer.NaturalVideoHeight <= 0 || area.Width < 2 || area.Height < 2) return;
-        var fit = Math.Min(area.Width / (double)mediaPlayer.NaturalVideoWidth, area.Height / (double)mediaPlayer.NaturalVideoHeight);
-        var width = Math.Max(1, (int)Math.Floor(mediaPlayer.NaturalVideoWidth * fit));
-        var height = Math.Max(1, (int)Math.Floor(mediaPlayer.NaturalVideoHeight * fit));
-        var bounds = new Rectangle(area.X + (area.Width - width) / 2, area.Y + (area.Height - height) / 2, width, height);
+        if (!videoHost.Visible) return;
+        var container = ActiveVideoContainer;
+        var area = container.ClientRectangle;
+        if (area.Width < 2 || area.Height < 2) return;
+        if (!videoExpanded && (mediaPlayer.NaturalVideoWidth <= 0 || mediaPlayer.NaturalVideoHeight <= 0)) return;
+        var bounds = TargetVideoBounds(container);
         if (videoHost.Dock != DockStyle.None) videoHost.Dock = DockStyle.None;
         if (videoHost.Bounds != bounds) videoHost.Bounds = bounds;
     }
@@ -2299,11 +2868,16 @@ public sealed class StorePreviewControl : UserControl
         var height = Math.Max(1, videoHost.ClientSize.Height / scale);
         videoSurface.Width = width;
         videoSurface.Height = height;
-        // Size the MediaElement to the letterboxed picture itself (centered by the grid) so the picture's own
-        // corners can be rounded, not only the frame around it.
+        var fillFrame = videoExpanded || videoAnimating;
+        var stageColor = videoExpanded ? Theme.Background : Color.FromArgb(10, 13, 19);
+        videoSurface.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(stageColor.R, stageColor.G, stageColor.B));
+        mediaPlayer.Stretch = fillFrame ? Stretch.UniformToFill : Stretch.Uniform;
+
+        // In expanded/animated mode fill the rounded frame completely so no left/right bands appear.
+        // In the compact preview, size the MediaElement to the picture's aspect ratio so its corners are rounded.
         var videoWidth = width;
         var videoHeight = height;
-        if (mediaPlayer.NaturalVideoWidth > 0 && mediaPlayer.NaturalVideoHeight > 0)
+        if (!fillFrame && mediaPlayer.NaturalVideoWidth > 0 && mediaPlayer.NaturalVideoHeight > 0)
         {
             var fit = Math.Min(width / mediaPlayer.NaturalVideoWidth, height / mediaPlayer.NaturalVideoHeight);
             videoWidth = Math.Max(1, Math.Floor(mediaPlayer.NaturalVideoWidth * fit));
@@ -2547,5 +3121,20 @@ public sealed class StorePreviewControl : UserControl
     private static void DisposeFlowChildren(Control parent)
     {
         foreach (Control child in parent.Controls.Cast<Control>().ToArray()) { parent.Controls.Remove(child); child.Dispose(); }
+    }
+
+    private sealed class ExpandedVideoOverlay : Panel
+    {
+        public event Action? EscapePressed;
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (keyData == Keys.Escape)
+            {
+                EscapePressed?.Invoke();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
     }
 }
