@@ -7,15 +7,19 @@ namespace ValoAutoPick;
 // The Riot Client publishes its own state changes on a loopback-only WebSocket.
 internal static class RiotLocalEvents
 {
-    internal enum Notification { None, QueueChanged, Reconnect }
+    internal enum Notification { None, QueueChanged, PregameChanged, Reconnect }
 
     internal static Task Listen(RiotApi api, Action changed, CancellationToken ct) =>
-        ListenCore(api, () => api.Subject, _ => { }, _ => changed(), () => { }, ct);
+        ListenCore(api, () => api.Subject, _ => { }, (_, _) => changed(), _ => { }, ct);
+
+    internal static Task Listen(RiotApi api, Action<Notification> changed, Action<string, bool>? connectionChanged, CancellationToken ct) =>
+        ListenCore(api, () => api.Subject, subject => connectionChanged?.Invoke(subject, true),
+            (_, notification) => changed(notification), subject => connectionChanged?.Invoke(subject, false), ct);
 
     internal static Task ListenAny(RiotApi api, Action<string> connected, Action<string> changed, Action disconnected, CancellationToken ct) =>
-        ListenCore(api, () => null, connected, changed, disconnected, ct);
+        ListenCore(api, () => null, connected, (subject, _) => changed(subject), _ => disconnected(), ct);
 
-    private static async Task ListenCore(RiotApi api, Func<string?> expectedSubject, Action<string> connected, Action<string> changed, Action disconnected, CancellationToken ct)
+    private static async Task ListenCore(RiotApi api, Func<string?> expectedSubject, Action<string> connected, Action<string, Notification> changed, Action<string> disconnected, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -32,7 +36,7 @@ internal static class RiotLocalEvents
         }
     }
 
-    private static async Task ListenConnection(int port, string password, string subject, Action<string> connected, Action<string> changed, Action disconnected, CancellationToken ct)
+    private static async Task ListenConnection(int port, string password, string subject, Action<string> connected, Action<string, Notification> changed, Action<string> disconnected, CancellationToken ct)
     {
         using var socket = new ClientWebSocket();
         socket.Options.Proxy = null;
@@ -50,7 +54,7 @@ internal static class RiotLocalEvents
         connected(subject);
         try
         {
-            changed(subject); // Reconcile once after connecting, in case an update was missed.
+            changed(subject, Notification.QueueChanged); // Reconcile once after connecting, in case an update was missed.
             var buffer = new byte[8192];
             using var message = new MemoryStream();
             string? lastPresence = null;
@@ -66,10 +70,10 @@ internal static class RiotLocalEvents
                 var notification = Classify(message.GetBuffer().AsMemory(0, (int)message.Length), subject, ref lastPresence);
                 message.SetLength(0);
                 if (notification == Notification.Reconnect) break;
-                if (notification == Notification.QueueChanged) changed(subject);
+                if (notification is Notification.QueueChanged or Notification.PregameChanged) changed(subject, notification);
             }
         }
-        finally { disconnected(); }
+        finally { disconnected(subject); }
     }
 
     internal static Notification Classify(ReadOnlyMemory<byte> message, string subject, ref string? lastPresence)
@@ -89,35 +93,47 @@ internal static class RiotLocalEvents
             var data = eventData.TryGetProperty("data", out var value) ? value : default;
             var resource = GetText(data, "resource");
             var service = GetText(data, "service");
+            if (ContainsPregameResource(uri) || ContainsPregameResource(resource) || ContainsPregameResource(service)) return Notification.PregameChanged;
             if (ContainsPartyResource(uri) || ContainsPartyResource(resource) || ContainsPartyResource(service)) return Notification.QueueChanged;
             if (!uri.StartsWith("/chat/v4/presences", StringComparison.OrdinalIgnoreCase)) return Notification.None;
 
             if (data.ValueKind == JsonValueKind.Object && data.TryGetProperty("presences", out var presences) && presences.ValueKind == JsonValueKind.Array)
             {
+                var result = Notification.None;
                 foreach (var presence in presences.EnumerateArray())
-                    if (PresenceChanged(presence, subject, ref lastPresence)) return Notification.QueueChanged;
+                {
+                    var current = PresenceNotification(presence, subject, ref lastPresence);
+                    if (current == Notification.PregameChanged) return Notification.PregameChanged;
+                    if (current == Notification.QueueChanged) result = Notification.QueueChanged;
+                }
+                return result;
             }
-            else if (PresenceChanged(data, subject, ref lastPresence)) return Notification.QueueChanged;
+            return PresenceNotification(data, subject, ref lastPresence);
         }
         catch (JsonException) { }
         return Notification.None;
     }
+
+    private static bool ContainsPregameResource(string value) =>
+        value.Contains("ares-pregame", StringComparison.OrdinalIgnoreCase) ||
+        value.Contains("/pregame/v1/", StringComparison.OrdinalIgnoreCase) ||
+        value.StartsWith("pregame/v1/", StringComparison.OrdinalIgnoreCase);
 
     private static bool ContainsPartyResource(string value) =>
         value.Contains("ares-parties", StringComparison.OrdinalIgnoreCase) ||
         value.Contains("/parties/v1/parties/", StringComparison.OrdinalIgnoreCase) ||
         value.StartsWith("parties/v1/parties/", StringComparison.OrdinalIgnoreCase);
 
-    private static bool PresenceChanged(JsonElement presence, string subject, ref string? lastPresence)
+    private static Notification PresenceNotification(JsonElement presence, string subject, ref string? lastPresence)
     {
         if (!string.Equals(GetText(presence, "puuid"), subject, StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(GetText(presence, "product"), "valorant", StringComparison.OrdinalIgnoreCase)) return false;
+            !string.Equals(GetText(presence, "product"), "valorant", StringComparison.OrdinalIgnoreCase)) return Notification.None;
         var encoded = GetText(presence, "private");
-        if (encoded.Length == 0 || encoded.Length > 65536) return false;
+        if (encoded.Length == 0 || encoded.Length > 65536) return Notification.None;
         try
         {
             using var data = JsonDocument.Parse(Convert.FromBase64String(encoded));
-            if (data.RootElement.ValueKind != JsonValueKind.Object) return false;
+            if (data.RootElement.ValueKind != JsonValueKind.Object) return Notification.None;
             var phase = GetText(data.RootElement, "sessionLoopState");
             var party = GetText(data.RootElement, "partyState");
             if (phase.Length == 0 && data.RootElement.TryGetProperty("matchPresenceData", out var matchData))
@@ -127,14 +143,17 @@ internal static class RiotLocalEvents
                 if (party.Length == 0) party = GetText(partyData, "partyState");
                 if (phase.Length == 0) phase = GetText(partyData, "partyOwnerSessionLoopState");
             }
-            if (phase.Length == 0 && party.Length == 0) return false;
+            if (phase.Length == 0 && party.Length == 0) return Notification.None;
             var current = phase + "|" + party;
-            if (current == lastPresence) return false;
+            if (current == lastPresence) return Notification.None;
             lastPresence = current;
-            return true;
+            if (phase.Equals("PREGAME", StringComparison.OrdinalIgnoreCase) ||
+                party.Equals("MATCHMADE_GAME_STARTING", StringComparison.OrdinalIgnoreCase))
+                return Notification.PregameChanged;
+            return Notification.QueueChanged;
         }
-        catch (FormatException) { return false; }
-        catch (JsonException) { return false; }
+        catch (FormatException) { return Notification.None; }
+        catch (JsonException) { return Notification.None; }
     }
 
     private static string GetText(JsonElement element, string name) =>

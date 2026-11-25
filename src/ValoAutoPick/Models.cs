@@ -16,6 +16,8 @@ public record Agent(string Id, string Name, string Role, string RoleIconId = "",
 {
     public override string ToString() => Name;
 }
+public record LiveRosterPlayer(string Subject, string TeamId, string AgentId, bool Incognito, bool HideAccountLevel, int? AccountLevel);
+public record LiveRosterMatch(string MatchId, string MapId, string ModeId, IReadOnlyList<LiveRosterPlayer> Players);
 public static class AgentAccess
 {
     // Base agents are selectable for every account but are not returned by
@@ -153,6 +155,12 @@ public interface IGameApi
     Task<MatchSnapshot> GetMatch(string matchId, CancellationToken ct);
     Task Select(string matchId, string agentId, CancellationToken ct);
     Task Lock(string matchId, string agentId, CancellationToken ct);
+    Task<MatchSnapshot?> LockAndConfirm(string matchId, string agentId, CancellationToken ct) => LockWithoutSnapshot(matchId, agentId, ct);
+    private async Task<MatchSnapshot?> LockWithoutSnapshot(string matchId, string agentId, CancellationToken ct)
+    {
+        await Lock(matchId, agentId, ct);
+        return null;
+    }
 }
 public sealed class ApiException(int status, int retrySeconds = 5) : Exception($"通信応答: HTTP {status}")
 {

@@ -120,7 +120,10 @@ public sealed record MatchDetailsData(
     IReadOnlyList<MatchPlayerData> Players,
     IReadOnlyList<MatchTeamData> Teams,
     IReadOnlyList<RoundResultData> Rounds,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings)
+{
+    public CompetitiveUpdate? CompetitiveUpdate { get; init; }
+}
 
 public sealed record MatchParseResult(MatchDetailsData? Match, string? Error)
 {
@@ -237,6 +240,11 @@ public sealed record HistoryBreakdownEntry(
     double? WinRatePercent);
 
 public sealed record PlayerHistoryEntry(string MatchId, string MapId, string QueueId, long? GameStartMillis, PlayerMatchStats Stats);
+public sealed record TrendPoint(string MatchId, string MapId, DateTimeOffset Date, double Value, MatchOutcome Outcome)
+{
+    public int? TierAfterUpdate { get; init; }
+    public int? RankedRatingEarned { get; init; }
+}
 
 /// <summary>
 /// History for one subject. Averages are the arithmetic mean of per-match values that are
@@ -601,6 +609,36 @@ public static class MatchDetailsParser
 
 public static class MatchAnalyticsEngine
 {
+    public static IEnumerable<MatchAnalytics> CompetitiveOnly(IEnumerable<MatchAnalytics> matches) =>
+        matches.Where(match => DisplayQueueId(match.Match).Equals("competitive", StringComparison.OrdinalIgnoreCase));
+
+    public static IReadOnlyList<TrendPoint> Trend(IEnumerable<MatchAnalytics> matches, string subject, string metric, int limit = 20)
+    {
+        return matches.Where(m => m.Info.GameStartUtc.HasValue && m.FindPlayer(subject) is not null)
+            .OrderByDescending(m => m.Info.GameStartMillis).DistinctBy(m => m.Info.MatchId, StringComparer.OrdinalIgnoreCase)
+            .Select(m =>
+            {
+                var p = m.FindPlayer(subject)!;
+                double? value = metric switch
+                {
+                    "ACS" => p.AverageCombatScore, "ADR" => p.AverageDamagePerRound,
+                    "HS%" => p.HeadshotPercent, "K/D" => p.KillDeathRatio,
+                    "RR推移" when m.Info.QueueId.Equals("competitive", StringComparison.OrdinalIgnoreCase) => m.Match.CompetitiveUpdate?.RankedRatingAfterUpdate,
+                    _ => null
+                };
+                return value is { } v && double.IsFinite(v) ? new TrendPoint(m.Info.MatchId, m.Info.MapId, m.Info.GameStartUtc!.Value, v, p.Outcome)
+                {
+                    TierAfterUpdate = m.Match.CompetitiveUpdate?.TierAfterUpdate,
+                    RankedRatingEarned = m.Match.CompetitiveUpdate?.RankedRatingEarned
+                } : null;
+            }).Where(p => p is not null).Take(Math.Max(0, limit)).Reverse().Cast<TrendPoint>().ToArray();
+    }
+
+    public static PlayerHistorySummary Today(IEnumerable<MatchAnalytics> matches, string subject, DateTimeOffset now, TimeZoneInfo timezone)
+    {
+        var date = TimeZoneInfo.ConvertTime(now, timezone).Date;
+        return AnalyzeHistory(matches.Where(m => m.Info.GameStartUtc is { } start && TimeZoneInfo.ConvertTime(start, timezone).Date == date), subject);
+    }
     private static readonly StringComparer IdComparer = StringComparer.OrdinalIgnoreCase;
     private static readonly HashSet<string> AcsQueues = new(StringComparer.OrdinalIgnoreCase)
     {

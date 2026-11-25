@@ -14,12 +14,21 @@ public sealed class StorePreviewControl : UserControl
     private const string BuddyType = "dd3bf334-87f3-40bd-b043-682a57a8dc3a";
     private const string SprayType = "d5f120f8-ff8c-4aac-92ea-f2b5acbe9475";
     private const string PlayerCardType = "3f296c07-64c3-494c-923b-fe692a4fa1bd";
+    private const string PlayerTitleType = "de7caa6b-adf7-4588-bbd1-143831e786c6";
     private static readonly Dictionary<string, string> CurrencyNames = new(StringComparer.OrdinalIgnoreCase)
     {
         ["85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741"] = "VP",
         ["85ca954a-41f2-ce94-9b45-8ca3dd39a00d"] = "KC"
     };
     private readonly CatalogClient catalog = new();
+    private readonly WishlistStorage wishlistStorage = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ValoAutoPick", "wishlist.json"));
+    private WishlistState wishlist = new();
+    private readonly ThemedButton wishlistFilter = new() { Text = "★ ウィッシュリストのみ", Compact = true, Variant = ButtonVariant.Chip, AutoSize = true };
+    private readonly ThemedButton wishlistButton = new() { Text = "☆ ウィッシュリストに追加", Compact = true, Variant = ButtonVariant.Chip };
+    private readonly Label walletVpLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
+    private readonly Label walletRpLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
+    private readonly Label walletKcLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
+    public event Action<string>? WishlistArrival;
     private readonly RiotApi riot;
     private readonly bool ownsRiot;
     private readonly bool shellAuthentication;
@@ -63,7 +72,7 @@ public sealed class StorePreviewControl : UserControl
     private readonly SkeletonScreen dailySkeleton = new(SkeletonLayout.StoreOffers) { Dock = DockStyle.Fill, BackColor = Theme.Surface, Visible = false };
     private readonly ResponsiveCardGrid dailyOffers = OfferGrid(1.5);
     private readonly ResponsiveCardGrid nightOffers = OfferGrid(1.35);
-    private readonly ResponsiveCardGrid bundleCards = OfferGrid(1.5);
+    private readonly ResponsiveCardGrid bundleCards = OfferGrid(2.0);
     private readonly ResponsiveCardGrid accessoryCards = OfferGrid(1.2);
     private readonly FlowLayoutPanel catalogGrid = new() { Dock = DockStyle.Fill, AutoScroll = false, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = new Padding(2) };
     private readonly Panel catalogGridHost = new() { Dock = DockStyle.Fill, BackColor = Theme.Surface, Margin = Padding.Empty };
@@ -213,6 +222,7 @@ public sealed class StorePreviewControl : UserControl
             mediaPlayer.Play();
         };
         mediaPlayer.MediaEnded += mediaEndedHandler;
+        wishlist = wishlistStorage.Load();
         BuildInterface();
         WireEvents();
         UpdateAccountState();
@@ -349,6 +359,9 @@ public sealed class StorePreviewControl : UserControl
         ShowPreviewImage();
         storefront = null;
         storefrontFetchedAt = default;
+        walletVpLabel.Text = "—";
+        walletRpLabel.Text = "—";
+        walletKcLabel.Text = "—";
         UpdateAccountState();
         RenderStorefront();
         activeProgressStatuses.RemoveAll(message => message.StartsWith("今日のショップ", StringComparison.Ordinal));
@@ -385,17 +398,45 @@ public sealed class StorePreviewControl : UserControl
         var counts = new RoundedCard { Margin = Padding.Empty, Padding = Padding.Empty, AccessibleName = "カタログの収録件数" };
         var blocks = new[] { CountBlock(skinCountLabel, "武器スキン"), CountBlock(chromaCountLabel, "カラー"), CountBlock(videoCountLabel, "動画") };
         counts.Controls.AddRange(blocks);
-        header.Controls.Add(title); header.Controls.Add(statusRow); header.Controls.Add(counts);
+        var walletCard = new RoundedCard { Margin = Padding.Empty, Padding = Padding.Empty, AccessibleName = "所持クレジット" };
+        var walletBlocks = new[]
+        {
+            WalletBlock(walletVpLabel, "VP", Theme.Red, "ヴァロラントポイント (VP)"),
+            WalletBlock(walletRpLabel, "RP", Theme.Friendly, "レディアナイトポイント (RP)"),
+            WalletBlock(walletKcLabel, "KC", Theme.Role("センチネル"), "キングダムクレジット (KC)")
+        };
+        var walletDividers = new[]
+        {
+            new Panel { BackColor = Theme.Border, Margin = Padding.Empty },
+            new Panel { BackColor = Theme.Border, Margin = Padding.Empty }
+        };
+        walletCard.Controls.AddRange(walletBlocks);
+        walletCard.Controls.AddRange(walletDividers);
+        header.Controls.Add(title); header.Controls.Add(statusRow); header.Controls.Add(walletCard); header.Controls.Add(counts);
         void Place()
         {
             var s = new Func<int, int>(value => UiMetrics.Px(header, value));
             var inset = s(UiMetrics.ControlGap);
-            var blockHeight = blocks.Max(block => block.Height);
+            var gap = s(UiMetrics.ControlGap);
+            var contentGap = s(UiMetrics.ContentGap);
+            var blockHeight = Math.Max(blocks.Max(block => block.Height), walletBlocks.Max(block => block.Height));
             var cardHeight = blockHeight + inset * 2;
             var cardWidth = s(360);
-            var headerHeight = cardHeight + s(UiMetrics.ControlGap);
+            var walletWidth = s(400);
+            var minTitleWidth = s(340);
+            var inlineWallet = header.ClientSize.Width >= minTitleWidth + contentGap + walletWidth + gap + cardWidth;
+            var headerHeight = (inlineWallet ? cardHeight : cardHeight * 2 + gap) + gap;
             if (row.Height != headerHeight) row.Height = headerHeight;
             counts.Bounds = new Rectangle(Math.Max(0, header.ClientSize.Width - cardWidth), 0, cardWidth, cardHeight);
+            if (inlineWallet)
+            {
+                walletCard.Bounds = new Rectangle(counts.Left - gap - walletWidth, 0, walletWidth, cardHeight);
+            }
+            else
+            {
+                var stackedWidth = Math.Min(header.ClientSize.Width, walletWidth + gap + cardWidth);
+                walletCard.Bounds = new Rectangle(Math.Max(0, header.ClientSize.Width - stackedWidth), cardHeight + gap, stackedWidth, cardHeight);
+            }
             var innerWidth = Math.Max(0, counts.ClientSize.Width - inset * 2);
             for (var i = 0; i < blocks.Length; i++)
             {
@@ -403,8 +444,23 @@ public sealed class StorePreviewControl : UserControl
                 var right = inset + innerWidth * (i + 1) / blocks.Length;
                 blocks[i].Bounds = new Rectangle(left, inset, right - left, blockHeight);
             }
+            var walletInnerWidth = Math.Max(0, walletCard.ClientSize.Width - inset * 2);
+            var cellPad = s(10);
+            var dividerInset = s(6);
+            var dividerHeight = Math.Max(1, blockHeight - dividerInset * 2);
+            for (var i = 0; i < walletBlocks.Length; i++)
+            {
+                var left = inset + walletInnerWidth * i / walletBlocks.Length;
+                var right = inset + walletInnerWidth * (i + 1) / walletBlocks.Length;
+                var padLeft = i == 0 ? 0 : cellPad;
+                var padRight = i == walletBlocks.Length - 1 ? 0 : s(6);
+                walletBlocks[i].Bounds = new Rectangle(left + padLeft, inset, Math.Max(1, right - left - padLeft - padRight), blockHeight);
+                if (i > 0)
+                    walletDividers[i - 1].Bounds = new Rectangle(left, inset + dividerInset, 1, dividerHeight);
+            }
             var titleHeight = NativePageStyle.TextHeight(header, title.Font, verticalPadding: UiMetrics.ControlGap);
-            var leftWidth = Math.Max(0, header.ClientSize.Width - counts.Width - s(UiMetrics.ContentGap));
+            var rightAnchor = inlineWallet ? walletCard.Left : counts.Left;
+            var leftWidth = Math.Max(0, rightAnchor - contentGap);
             var showStatus = !string.IsNullOrWhiteSpace(statusLabel.Text);
             var statusHeight = NativePageStyle.TextHeight(header, statusLabel.Font, verticalPadding: 0);
             var top = Math.Max(0, (cardHeight - titleHeight - statusHeight) / 2);
@@ -417,6 +473,31 @@ public sealed class StorePreviewControl : UserControl
         statusLabel.FontChanged += (_, _) => Place();
         Place();
         return header;
+    }
+
+    private Control WalletBlock(Label value, string caption, Color accent, string tooltip)
+    {
+        var block = new Panel { Width = 124, Height = 64, BackColor = Theme.Surface, Margin = Padding.Empty };
+        var text = NativePageStyle.Label(caption, NativePageStyle.SmallBold, accent);
+        text.AutoSize = false;
+        text.AutoEllipsis = false;
+        value.TextAlign = ContentAlignment.BottomLeft;
+        block.Controls.Add(value); block.Controls.Add(text);
+        mediaToolTips.SetToolTip(block, tooltip);
+        mediaToolTips.SetToolTip(value, tooltip);
+        mediaToolTips.SetToolTip(text, tooltip);
+        void Place()
+        {
+            var labelHeight = NativePageStyle.TextHeight(block, text.Font, verticalPadding: 4);
+            var valueHeight = NativePageStyle.TextHeight(block, value.Font, verticalPadding: 4);
+            block.Height = valueHeight + labelHeight;
+            value.Bounds = new Rectangle(0, 0, block.ClientSize.Width, valueHeight);
+            text.Bounds = new Rectangle(0, valueHeight, block.ClientSize.Width, labelHeight);
+        }
+        block.DpiChangedAfterParent += (_, _) => Place();
+        block.Resize += (_, _) => Place();
+        Place();
+        return block;
     }
 
     private static Control CountBlock(Label value, string caption)
@@ -578,8 +659,8 @@ public sealed class StorePreviewControl : UserControl
         card.Padding = new Padding(UiMetrics.Px(this, UiMetrics.ContentGap));
         var header = new Panel { Dock = DockStyle.Top, Height = UiMetrics.Px(this, 32), BackColor = Theme.Surface };
         var name = NativePageStyle.Label(title, NativePageStyle.SmallBold, Theme.Muted); name.Dock = DockStyle.Fill;
-        var timerCaption = NativePageStyle.Label("次回更新  ", NativePageStyle.Small, Theme.Muted); timerCaption.Dock = DockStyle.Right; timerCaption.Width = UiMetrics.Px(this, 90); timerCaption.TextAlign = ContentAlignment.MiddleRight;
-        timer.Dock = DockStyle.Right; timer.Width = UiMetrics.Px(this, 90); timer.TextAlign = ContentAlignment.MiddleRight;
+        var timerCaption = NativePageStyle.Label("次回更新  ", NativePageStyle.Small, Theme.Muted); timerCaption.Dock = DockStyle.Right; timerCaption.AutoSize = true; timerCaption.AutoEllipsis = false; timerCaption.TextAlign = ContentAlignment.MiddleRight;
+        timer.Dock = DockStyle.Right; timer.AutoSize = true; timer.AutoEllipsis = false; timer.MinimumSize = new Size(UiMetrics.Px(this, 88), 0); timer.TextAlign = ContentAlignment.MiddleRight;
         header.Controls.Add(timerCaption); header.Controls.Add(timer); header.Controls.Add(name);
         body = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Surface, Padding = new Padding(0, 8, 0, 0) };
         card.Controls.Add(body); card.Controls.Add(header);
@@ -589,13 +670,33 @@ public sealed class StorePreviewControl : UserControl
     private void BuildCatalogPage()
     {
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = Theme.Background, Margin = Padding.Empty };
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, UiMetrics.ButtonHeight + UiMetrics.ControlGap))); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, BackColor = Theme.Background,
+        var toolbarRow = new RowStyle(SizeType.Absolute, UiMetrics.Px(this, UiMetrics.ButtonHeight + UiMetrics.ControlGap));
+        layout.RowStyles.Add(toolbarRow); layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, BackColor = Theme.Background,
             Padding = new Padding(0, 0, 0, UiMetrics.Px(this, UiMetrics.ControlGap)), Margin = Padding.Empty };
         searchBox.Width = UiMetrics.Px(this, 270); searchBox.Height = UiMetrics.Px(this, UiMetrics.ButtonHeight); searchBox.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
         categorySelect.Width = UiMetrics.Px(this, 230); categorySelect.Height = UiMetrics.Px(this, UiMetrics.ButtonHeight); categorySelect.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
-        weaponSelect.Width = UiMetrics.Px(this, 210); weaponSelect.Height = UiMetrics.Px(this, UiMetrics.ButtonHeight); weaponSelect.Margin = Padding.Empty;
-        toolbar.Controls.Add(searchBox); toolbar.Controls.Add(categorySelect); toolbar.Controls.Add(weaponSelect);
+        weaponSelect.Width = UiMetrics.Px(this, 210); weaponSelect.Height = UiMetrics.Px(this, UiMetrics.ButtonHeight); weaponSelect.Margin = new Padding(0, 0, UiMetrics.Px(this, UiMetrics.ControlGap), 0);
+        wishlistFilter.AutoSize = false;
+        wishlistFilter.Margin = Padding.Empty;
+        wishlistFilter.Size = new Size(UiMetrics.Px(this, 210), UiMetrics.Px(this, UiMetrics.ButtonHeight));
+        wishlistFilter.Click += (_, _) => { wishlistFilter.Selected = !wishlistFilter.Selected; catalogPageIndex = 0; RenderCatalogGrid(); };
+        toolbar.Controls.Add(searchBox); toolbar.Controls.Add(categorySelect); toolbar.Controls.Add(weaponSelect); toolbar.Controls.Add(wishlistFilter);
+        void ResizeToolbar()
+        {
+            if (toolbar.ClientSize.Width <= 0) return;
+            var rows = 1; var used = 0;
+            foreach (Control item in toolbar.Controls)
+            {
+                var width = item.Width + item.Margin.Horizontal;
+                if (used > 0 && used + width > toolbar.ClientSize.Width) { rows++; used = 0; }
+                used += width;
+            }
+            var height = rows * UiMetrics.Px(toolbar, UiMetrics.ButtonHeight) + UiMetrics.Px(toolbar, UiMetrics.ControlGap);
+            if (Math.Abs(toolbarRow.Height - height) > .5f) toolbarRow.Height = height;
+        }
+        toolbar.SizeChanged += (_, _) => ResizeToolbar();
+        toolbar.DpiChangedAfterParent += (_, _) => ResizeToolbar();
         layout.Controls.Add(toolbar, 0, 0);
 
         var split = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = Theme.Background, Margin = Padding.Empty };
@@ -665,7 +766,7 @@ public sealed class StorePreviewControl : UserControl
         panel.Padding = new Padding(UiMetrics.Px(this, UiMetrics.CardInset));
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 8, BackColor = Theme.Surface, Margin = Padding.Empty, Padding = Padding.Empty };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 70)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 108)));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 45)));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 25)));
@@ -682,7 +783,8 @@ public sealed class StorePreviewControl : UserControl
         playVideoButton.Margin = playbackButton.Margin = muteVideoButton.Margin = stopVideoButton.Margin = Padding.Empty;
         mediaBar.Controls.Add(playVideoButton); mediaBar.Controls.Add(playbackButton);
         mediaBar.Controls.Add(muteVideoButton); mediaBar.Controls.Add(stopVideoButton);
-        header.Controls.Add(catalogTitle); header.Controls.Add(catalogMeta);
+        wishlistButton.Click += (_, _) => { if (selectedSkin is { } skin) ToggleWishlist(skin); };
+        header.Controls.Add(catalogTitle); header.Controls.Add(catalogMeta); header.Controls.Add(wishlistButton);
         var labelFont = SharedFonts.Get("Yu Gothic UI", 11.5f, FontStyle.Bold);
         var iconFont = SharedFonts.Get("Segoe MDL2 Assets", 14f);
         const TextFormatFlags measureFlags = TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
@@ -697,8 +799,9 @@ public sealed class StorePreviewControl : UserControl
         void PlaceHeader()
         {
             var s = new Func<int, int>(value => UiMetrics.Px(header, value));
+            wishlistButton.Bounds = new Rectangle(0, s(70), Math.Min(s(280), header.ClientSize.Width), s(34));
             catalogTitle.Bounds = new Rectangle(0, 0, header.ClientSize.Width, s(40));
-            catalogMeta.Bounds = new Rectangle(s(UiMetrics.TightGap), s(43), header.ClientSize.Width - s(UiMetrics.TightGap), s(22));
+            catalogMeta.Bounds = new Rectangle(s(UiMetrics.TightGap), s(43), Math.Max(0, header.ClientSize.Width - s(UiMetrics.TightGap)), s(22));
         }
         void PlaceMediaActions()
         {
@@ -916,6 +1019,7 @@ public sealed class StorePreviewControl : UserControl
             catalogLoaded = true;
             if (catalogTab.Selected) RenderCatalogGrid();
             RenderStorefront();
+            NotifyWishlistArrivals();
             SetStatus("", false);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
@@ -956,13 +1060,16 @@ public sealed class StorePreviewControl : UserControl
         if (storefront is null) RenderStorefront();
         try
         {
+            var walletTask = LoadWalletAsync(generation, operation.Token);
             using var response = await riot.GetStorefrontResponse(operation.Token);
             var next = StorefrontParser.Parse(response.RootElement);
             if (generation != storeGeneration || IsDisposed) return;
             storefront = next;
             storefrontFetchedAt = DateTimeOffset.UtcNow;
             RenderStorefront();
+            NotifyWishlistArrivals();
             SetStatus("", false);
+            await walletTask;
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested) { }
         catch (OperationCanceledException)
@@ -1126,6 +1233,14 @@ public sealed class StorePreviewControl : UserControl
         var price = NativePageStyle.Label(OfferPriceText(offer, night), NativePageStyle.SmallBold, Theme.Text); price.AutoSize = false; price.Dock = DockStyle.Bottom; price.Height = NativePageStyle.TextHeight(this, price.Font, verticalPadding: 4);
         card.Controls.Add(image); card.Controls.Add(price); card.Controls.Add(weapon); card.Controls.Add(title);
         void Select(object? _, EventArgs __) => SelectOffer(offer.ItemId);
+        if (skin is not null && wishlist.SkinIds.Contains(skin.Id))
+        {
+            var badge = NativePageStyle.Label("★ ほしいものリスト", NativePageStyle.SmallBold, Theme.Red);
+            badge.AutoSize = false; badge.Dock = DockStyle.Bottom;
+            FitLabelHeightToCard(card, badge);
+            badge.Click += Select;
+            card.Controls.Add(badge);
+        }
         card.Click += Select; title.Click += Select; image.Click += Select; weapon.Click += Select; price.Click += Select;
         if (discountLabel is not null) discountLabel.Click += Select;
         _ = LoadStoreImageAsync(image, offerImageCandidates, StoreImageToken);
@@ -1139,8 +1254,8 @@ public sealed class StorePreviewControl : UserControl
         var bannerUrls = catalogSnapshot?.Bundles.TryGetValue(bundle.DataAssetId, out info) == true ? info.Images : Array.Empty<string>();
         var title = NativePageStyle.Label(name, NativePageStyle.BodyBold); title.AutoSize = false; title.AutoEllipsis = false; title.Dock = DockStyle.Top;
         FitLabelHeightToCard(card, title);
-        // Banner art fills the card's image area edge to edge (cropped evenly, never stretched).
-        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Cover, PlaceholderText = "画像なし", RoundedCorners = true };
+        // Keep the full bundle artwork visible at its natural aspect ratio without clipping weapons.
+        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Contain, BackColor = Theme.Elevated, PlaceholderText = "画像なし", RoundedCorners = true };
         var items = bundle.Items.Where(item => item.ItemTypeId.Equals(SkinLevelType, StringComparison.OrdinalIgnoreCase)).ToArray();
         var detail = NativePageStyle.Label(BundleDetailText(bundle), NativePageStyle.Small, Theme.Muted);
         detail.AutoSize = false; detail.AutoEllipsis = false; detail.Dock = DockStyle.Bottom;
@@ -1162,15 +1277,68 @@ public sealed class StorePreviewControl : UserControl
     {
         StoreItemCard? item = null;
         if (catalogSnapshot is { } snapshot && snapshot.Accessories.TryGetValue(offer.ItemId, out var matchedItem)) item = matchedItem;
-        var name = item?.Name ?? $"アクセサリー · {offer.ItemId[..Math.Min(8, offer.ItemId.Length)]}";
+        var typeLabel = item?.Type ?? ItemTypeName(offer.ItemTypeId, true);
+        var isPlayerTitle = offer.ItemTypeId.Equals(PlayerTitleType, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(typeLabel, "プレイヤータイトル", StringComparison.Ordinal);
         var card = CreateStoreCard();
-        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Contain, PlaceholderText = "画像なし", RoundedCorners = true };
-        var accessoryText = $"{name}\n{item?.Type ?? ItemTypeName(offer.ItemTypeId, true)}  ·  {Money(offer.Cost)}";
-        var text = NativePageStyle.Label(accessoryText, NativePageStyle.Reading, Theme.Text); text.AutoSize = false; text.AutoEllipsis = false; text.Dock = DockStyle.Bottom;
+        var name = item?.Name ?? (isPlayerTitle ? "プレイヤータイトル" : $"{typeLabel} · {offer.ItemId[..Math.Min(8, offer.ItemId.Length)]}");
+        var accessoryText = $"{name}\n{typeLabel}  ·  {Money(offer.Cost)}";
+        var text = NativePageStyle.Label(accessoryText, NativePageStyle.Reading, Theme.Text);
+        text.AutoSize = false; text.AutoEllipsis = false; text.Dock = DockStyle.Bottom;
         FitLabelHeightToCard(card, text);
+        if (isPlayerTitle)
+        {
+            var previewText = !string.IsNullOrWhiteSpace(item?.TitleText) ? item.TitleText! : name;
+            var preview = CreatePlayerTitlePreview(previewText);
+            card.Controls.Add(preview); card.Controls.Add(text);
+            return card;
+        }
+        var image = new SharpImageBox { Dock = DockStyle.Fill, Fit = ImageFit.Contain, PlaceholderText = "画像なし", RoundedCorners = true };
         card.Controls.Add(image); card.Controls.Add(text);
         _ = LoadStoreImageAsync(image, item?.Images ?? Array.Empty<string>(), StoreImageToken);
         return card;
+    }
+
+    private Control CreatePlayerTitlePreview(string titleText)
+    {
+        var plate = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Elevated, Margin = Padding.Empty, AccessibleName = "プレイヤータイトルのプレビュー" };
+        var eyebrow = NativePageStyle.Label("PLAYER TITLE", NativePageStyle.Eyebrow, Theme.Muted);
+        eyebrow.AutoSize = false; eyebrow.AutoEllipsis = false; eyebrow.TextAlign = ContentAlignment.BottomCenter;
+        var value = NativePageStyle.Label(titleText, SharedFonts.Get("Yu Gothic UI", 14f, FontStyle.Bold), Theme.Text);
+        value.AutoSize = false; value.AutoEllipsis = false; value.TextAlign = ContentAlignment.MiddleCenter;
+        var accent = new Panel { BackColor = Theme.Red, Margin = Padding.Empty };
+        plate.Controls.Add(eyebrow); plate.Controls.Add(value); plate.Controls.Add(accent);
+        plate.Paint += (_, e) =>
+        {
+            if (plate.ClientSize.Width <= 2 || plate.ClientSize.Height <= 2) return;
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            var rect = new Rectangle(0, 0, plate.ClientSize.Width - 1, plate.ClientSize.Height - 1);
+            using var path = ThemedButton.Rounded(rect, UiMetrics.Px(plate, UiMetrics.CornerRadius));
+            using var pen = new Pen(Theme.Border, 1f);
+            e.Graphics.DrawPath(pen, path);
+        };
+        void Place()
+        {
+            var pad = UiMetrics.Px(plate, 14);
+            var innerWidth = Math.Max(1, plate.ClientSize.Width - pad * 2);
+            var eyebrowHeight = NativePageStyle.TextHeight(plate, eyebrow.Font, verticalPadding: 4);
+            var valueHeight = Math.Min(Math.Max(1, plate.ClientSize.Height - eyebrowHeight - UiMetrics.Px(plate, 28)),
+                NativePageStyle.TextBlockHeight(plate, value.Text, value.Font, innerWidth, verticalPadding: 6));
+            var barHeight = Math.Max(2, UiMetrics.Px(plate, 3));
+            var gap = UiMetrics.Px(plate, 8);
+            var total = eyebrowHeight + gap + valueHeight + gap + barHeight;
+            var top = Math.Max(pad / 2, (plate.ClientSize.Height - total) / 2);
+            eyebrow.Bounds = new Rectangle(pad, top, innerWidth, eyebrowHeight);
+            value.Bounds = new Rectangle(pad, eyebrow.Bottom + gap, innerWidth, valueHeight);
+            var barWidth = Math.Min(innerWidth, UiMetrics.Px(plate, 44));
+            accent.Bounds = new Rectangle((plate.ClientSize.Width - barWidth) / 2, value.Bottom + gap, barWidth, barHeight);
+            RoundedCorners.Apply(plate, UiMetrics.Px(plate, UiMetrics.CornerRadius));
+        }
+        plate.Resize += (_, _) => Place();
+        plate.DpiChangedAfterParent += (_, _) => Place();
+        plate.Disposed += (_, _) => RoundedCorners.Release(plate);
+        Place();
+        return plate;
     }
 
     private CancellationToken StoreImageToken => storeImageLoads?.Token ?? lifetime.Token;
@@ -1493,6 +1661,8 @@ public sealed class StorePreviewControl : UserControl
 
     private void RenderPreview()
     {
+        wishlistButton.Enabled = selectedSkin is not null;
+        wishlistButton.Text = selectedSkin is { } wished && wishlist.SkinIds.Contains(wished.Id) ? "★ 登録済み" : "☆ ウィッシュリストに追加";
         var skin = selectedSkin;
         var chromas = skin?.Chromas ?? [];
         var levels = skin?.Levels ?? [];
@@ -1727,6 +1897,7 @@ public sealed class StorePreviewControl : UserControl
         var category = categorySelect.SelectedItem?.ToString();
         var weapon = weaponSelect.SelectedItem?.ToString();
         return allSkins.Where(s =>
+            (!wishlistFilter.Selected || wishlist.SkinIds.Contains(s.Id)) &&
             (search.Length == 0 || (s.Name + " " + s.Weapon).Contains(search, StringComparison.CurrentCultureIgnoreCase)) &&
             (category is null or "すべてのカテゴリー" || CategoryLabel(CategoryKey(s.Category)).Equals(category, StringComparison.CurrentCultureIgnoreCase)) &&
             (weapon is null or "すべての武器" || s.Weapon.Equals(weapon, StringComparison.CurrentCultureIgnoreCase)));
@@ -1738,6 +1909,58 @@ public sealed class StorePreviewControl : UserControl
         skinCountLabel.Text = snapshot.SkinCount.ToString("N0");
         chromaCountLabel.Text = snapshot.ChromaCount.ToString("N0");
         videoCountLabel.Text = snapshot.VideoCount.ToString("N0");
+    }
+
+    private async Task LoadWalletAsync(int generation, CancellationToken token)
+    {
+        WalletBalances? balance = null;
+        try { balance = await riot.GetWallet(token); }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException or JsonException or InvalidOperationException or OperationCanceledException) { }
+        if (generation != storeGeneration || IsDisposed || Disposing) return;
+        static string Amount(long? value) => value?.ToString("N0") ?? "—";
+        walletVpLabel.Text = Amount(balance?.VP);
+        walletRpLabel.Text = Amount(balance?.RP);
+        walletKcLabel.Text = Amount(balance?.KC);
+    }
+
+    private void ToggleWishlist(SkinCard skin)
+    {
+        var added = wishlist.SkinIds.Add(skin.Id);
+        if (!added) wishlist.SkinIds.Remove(skin.Id);
+        try { wishlistStorage.Save(wishlist); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (added) wishlist.SkinIds.Remove(skin.Id); else wishlist.SkinIds.Add(skin.Id);
+            SetStatus("ウィッシュリストを保存できませんでした。", true);
+            return;
+        }
+        wishlistButton.Text = wishlist.SkinIds.Contains(skin.Id) ? "★ 登録済み" : "☆ ウィッシュリストに追加";
+        if (wishlistFilter.Selected) RenderCatalogGrid();
+        RenderStorefront();
+    }
+
+    private void NotifyWishlistArrivals()
+    {
+        if (storefront is null || !catalogLoaded || WishlistArrival is null || !riot.HasAccountSession) return;
+        var previousCycles = new Dictionary<string, string>(wishlist.NotifiedCycles, StringComparer.OrdinalIgnoreCase);
+        var notifications = new List<string>();
+        foreach (var section in new[] { (Name: "デイリー", Value: storefront.DailySkins), (Name: "ナイトマーケット", Value: storefront.NightMarket) })
+        {
+            if (section.Value is null || section.Value.RemainingSeconds <= 0) continue;
+            var matched = WishlistStorage.MatchOffers(wishlist, section.Value.Offers, id => FindSkinForReward(id)?.Skin.Id);
+            var names = matched.Select(id => allSkins.FirstOrDefault(skin => skin.Id.Equals(id, StringComparison.OrdinalIgnoreCase))?.Name ?? id).ToArray();
+            // The server reports a countdown in whole seconds; round the estimated expiry to absorb transit jitter.
+            var expiry = storefrontFetchedAt.AddSeconds(section.Value.RemainingSeconds).ToUnixTimeSeconds();
+            var cycle = ((expiry + 150) / 300).ToString();
+            var key = riot.Subject + ":" + section.Name;
+            if (!WishlistStorage.ShouldNotify(wishlist, key, cycle, names.Length > 0)) continue;
+            notifications.Add(section.Name + ": " + string.Join("、", names));
+            wishlist.NotifiedCycles[key] = cycle;
+        }
+        if (notifications.Count == 0) return;
+        try { wishlistStorage.Save(wishlist); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { wishlist.NotifiedCycles = previousCycles; return; }
+        WishlistArrival(string.Join("\n", notifications));
     }
 
     private void ShowStorePage()
@@ -2127,7 +2350,7 @@ public sealed class StorePreviewControl : UserControl
     private static string ItemTypeName(string typeId, bool accessory = false) => typeId.ToLowerInvariant() switch
     {
         BuddyType => "ガンバディー", SprayType => "スプレー", PlayerCardType => "プレイヤーカード",
-        "de7caa6b-adf7-4588-bbd1-143831e786c6" => "プレイヤータイトル", _ => accessory ? "アクセサリー" : "武器スキン"
+        PlayerTitleType => "プレイヤータイトル", _ => accessory ? "アクセサリー" : "武器スキン"
     };
     private static string Money(IReadOnlyDictionary<string, long>? cost)
     {

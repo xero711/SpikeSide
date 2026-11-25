@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="../../src/ValoAutoPick/Models.cs" Link="Models.cs" />
     <Compile Include="../../src/ValoAutoPick/PickEngine.cs" Link="PickEngine.cs" />
+    <Compile Include="../../src/ValoAutoPick/PickDiagnostics.cs" Link="PickDiagnostics.cs" />
     <Compile Include="../../src/ValoAutoPick/TrialUsage.cs" Link="TrialUsage.cs" />
   </ItemGroup>
 </Project>

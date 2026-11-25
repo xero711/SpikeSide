@@ -27,6 +27,9 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
             "", "", "", DateTimeOffset.MinValue, false);
     }
 
+    private static readonly TimeSpan PregameRequestTimeout = TimeSpan.FromSeconds(3);
+    private static readonly Regex GameFlowRegex = new(@"LogGameFlowStateManager:.*Broadcasting state changed to ([A-Za-z0-9_]+)",
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
     private RiotSession session = RiotSession.Empty;
     private readonly object sessionGate = new();
     private long sessionEpoch;
@@ -34,6 +37,8 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     private DateTimeOffset readinessConnectionCheck;
     private string readinessSubject = "";
     private bool readinessLocalAccount;
+    private string localEventConnectedSubject = "";
+    private readonly CharacterSelectLogTracker logTracker = new();
     public string Subject => CurrentSession.Subject;
     public string RegionLabel => CurrentSession.RegionLabel;
     public string AccountName => CurrentSession.AccountName;
@@ -75,6 +80,26 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         readinessSubject = "";
         readinessLocalAccount = false;
         readinessConnectionCheck = DateTimeOffset.MinValue;
+        Volatile.Write(ref localEventConnectedSubject, "");
+        logTracker.Reset();
+    }
+
+    internal void SetLocalEventConnected(string subject, bool connected)
+    {
+        if (connected && Guid.TryParse(subject, out _))
+        {
+            Volatile.Write(ref localEventConnectedSubject, subject);
+            readinessSubject = subject;
+            readinessLocalAccount = true;
+            readinessConnectionCheck = DateTimeOffset.UtcNow.AddSeconds(3);
+            return;
+        }
+        var current = Volatile.Read(ref localEventConnectedSubject);
+        if (string.IsNullOrEmpty(subject) || string.Equals(current, subject, StringComparison.OrdinalIgnoreCase))
+        {
+            Volatile.Write(ref localEventConnectedSubject, "");
+            readinessConnectionCheck = DateTimeOffset.MinValue;
+        }
     }
 
     public async Task Login(AuthResult auth, string regionSetting, CancellationToken ct, string? expectedSubject = null)
@@ -307,7 +332,7 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
     }
     private async Task<JsonDocument?> Request(HttpMethod method, string path, bool missingIsIdle, CancellationToken ct,
-        bool playerData = false, string? jsonBody = null, RiotSession? sessionSnapshot = null)
+        bool playerData = false, string? jsonBody = null, RiotSession? sessionSnapshot = null, TimeSpan? timeout = null)
     {
         var current = sessionSnapshot ?? CurrentSession;
         var baseUrl = playerData ? current.PlayerDataServer : current.Server;
@@ -320,7 +345,10 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         request.Headers.Add("X-Riot-ClientPlatform", ClientPlatformHeader);
         if (jsonBody is not null || method == HttpMethod.Post)
             request.Content = new StringContent(jsonBody ?? "{}", Encoding.UTF8, "application/json");
-        using var response = await remote.SendAsync(request, ct);
+        using var requestTimeout = timeout is { } limit ? CancellationTokenSource.CreateLinkedTokenSource(ct) : null;
+        if (requestTimeout != null && timeout is { } limitValue) requestTimeout.CancelAfter(limitValue);
+        var effectiveToken = requestTimeout?.Token ?? ct;
+        using var response = await remote.SendAsync(request, effectiveToken);
         if (response.StatusCode == HttpStatusCode.NotFound && missingIsIdle) return null;
         if (!response.IsSuccessStatusCode)
         {
@@ -329,7 +357,7 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
                 ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow)?.TotalSeconds ?? 5;
             throw new ApiException((int)response.StatusCode, (int)Math.Ceiling(retry));
         }
-        var json = await response.Content.ReadAsStringAsync(ct);
+        var json = await response.Content.ReadAsStringAsync(effectiveToken);
         return JsonDocument.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
     }
     private const string AgentItemType = "01bb38e1-da47-4e6a-9b3d-945fe4655707";
@@ -345,6 +373,21 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         var current = CurrentSession;
         EnsurePlayerDataSession(current);
         return (await Request(HttpMethod.Post, $"/store/v3/storefront/{current.Subject}", false, ct, playerData: true, sessionSnapshot: current))!;
+    }
+    public async Task<WalletBalances> GetWallet(CancellationToken ct)
+    {
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
+        using var result = await Request(HttpMethod.Get, $"/store/v1/wallet/{current.Subject}", false, ct, playerData: true, sessionSnapshot: current);
+        return WalletBalances.Parse(result!.RootElement);
+    }
+
+    public async Task<IReadOnlyDictionary<string, CompetitiveUpdate>> GetCompetitiveUpdates(CancellationToken ct)
+    {
+        var current = CurrentSession;
+        EnsurePlayerDataSession(current);
+        using var result = await Request(HttpMethod.Get, $"/mmr/v1/players/{current.Subject}/competitiveupdates?startIndex=0&endIndex=20&queue=competitive", false, ct, playerData: true, sessionSnapshot: current);
+        return CompetitiveUpdate.Parse(result!.RootElement);
     }
     public async Task<RiotMatchHistoryPage> GetMatchHistory(int startIndex, int pageSize, CancellationToken ct, string? queue = null)
     {
@@ -430,7 +473,7 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     public async Task<string?> GetMatchId(CancellationToken ct)
     {
         var current = CurrentSession;
-        using var result = await Request(HttpMethod.Get, $"/pregame/v1/players/{current.Subject}", true, ct, sessionSnapshot: current);
+        using var result = await Request(HttpMethod.Get, $"/pregame/v1/players/{current.Subject}", true, ct, sessionSnapshot: current, timeout: PregameRequestTimeout);
         if (result == null) return null;
         var id = Text(result.RootElement, "MatchID");
         return Guid.TryParse(id, out _) ? id : null;
@@ -456,6 +499,98 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         var map = Text(root, "MapID");
         return string.IsNullOrWhiteSpace(map) ? null : map;
     }
+    public async Task<LiveRosterMatch?> GetCoreLiveRoster(string matchId, CancellationToken ct)
+    {
+        ValidateId(matchId);
+        var current = CurrentSession;
+        using var result = await Request(HttpMethod.Get, $"/core-game/v1/matches/{matchId}", true, ct, sessionSnapshot: current);
+        if (result == null) return null;
+        return ParseCoreLiveRoster(result.RootElement, matchId);
+    }
+
+    public async Task<(int Allies, int Enemies)?> GetLocalLiveScore(string matchMap, CancellationToken ct)
+    {
+        var current = CurrentSession;
+        var connection = await GetLocalEventConnection(current.Subject, ct);
+        if (connection is null) return null;
+        using var data = await LocalGet(connection.Value.Port, connection.Value.Password, "/chat/v4/presences", ct);
+        if (!string.Equals(CurrentSession.Subject, current.Subject, StringComparison.OrdinalIgnoreCase)) return null;
+        return ParseLocalLiveScore(data.RootElement, current.Subject, matchMap);
+    }
+
+    internal static (int Allies, int Enemies)? ParseLocalLiveScore(JsonElement root, string subject, string matchMap)
+    {
+        var expectedMap = MapCatalog.Key(matchMap);
+        if (expectedMap.Length == 0 || root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("presences", out var presences) || presences.ValueKind != JsonValueKind.Array) return null;
+        foreach (var presence in presences.EnumerateArray())
+        {
+            if (presence.ValueKind != JsonValueKind.Object || !Text(presence, "puuid").Equals(subject, StringComparison.OrdinalIgnoreCase) || !Text(presence, "product").Equals("valorant", StringComparison.OrdinalIgnoreCase)) continue;
+            var encoded = Text(presence, "private");
+            if (encoded.Length == 0 || encoded.Length > 65536) return null;
+            try
+            {
+                using var data = JsonDocument.Parse(Convert.FromBase64String(encoded));
+                var p = data.RootElement;
+                if (p.ValueKind != JsonValueKind.Object) return null;
+                var match = p.TryGetProperty("matchPresenceData", out var m) && m.ValueKind == JsonValueKind.Object ? m : default;
+                var party = p.TryGetProperty("partyPresenceData", out var pt) && pt.ValueKind == JsonValueKind.Object ? pt : default;
+                var loopState = FirstNonEmpty(Text(match, "sessionLoopState"), Text(p, "sessionLoopState"), Text(party, "partyOwnerSessionLoopState"));
+                var presenceMap = FirstNonEmpty(Text(match, "matchMap"), Text(p, "matchMap"));
+                if (!loopState.Equals("INGAME", StringComparison.OrdinalIgnoreCase) ||
+                    !MapCatalog.Key(presenceMap).Equals(expectedMap, StringComparison.OrdinalIgnoreCase) ||
+                    !TryReadScore(p, match, party, "partyOwnerMatchScoreAllyTeam", out var allies) ||
+                    !TryReadScore(p, match, party, "partyOwnerMatchScoreEnemyTeam", out var enemies)) return null;
+                return (allies, enemies);
+            }
+            catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException) { return null; }
+        }
+        return null;
+    }
+
+    private static string FirstNonEmpty(params string[] values)
+    {
+        foreach (var value in values) if (!string.IsNullOrWhiteSpace(value)) return value;
+        return "";
+    }
+
+    private static bool TryReadScore(JsonElement root, JsonElement match, JsonElement party, string property, out int score)
+    {
+        score = 0;
+        foreach (var container in new[] { root, match, party })
+        {
+            if (container.ValueKind == JsonValueKind.Object &&
+                container.TryGetProperty(property, out var element) &&
+                element.ValueKind == JsonValueKind.Number &&
+                element.TryGetInt32(out var value) && value >= 0)
+            {
+                score = value;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    internal static LiveRosterMatch ParseCoreLiveRoster(JsonElement root, string matchId)
+    {
+        if (root.ValueKind != JsonValueKind.Object || !string.Equals(Text(root, "MatchID"), matchId, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("試合情報が不正です");
+        var players = new List<LiveRosterPlayer>();
+        if (root.TryGetProperty("Players", out var list) && list.ValueKind == JsonValueKind.Array)
+            foreach (var item in list.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object || !Guid.TryParse(Text(item, "Subject"), out _) ||
+                    item.TryGetProperty("IsCoach", out var coach) && coach.ValueKind == JsonValueKind.True) continue;
+                var incognito = true; var hideLevel = true; int? level = null;
+                if (item.TryGetProperty("PlayerIdentity", out var identity) && identity.ValueKind == JsonValueKind.Object)
+                {
+                    incognito = !identity.TryGetProperty("Incognito", out var hidden) || hidden.ValueKind != JsonValueKind.False;
+                    hideLevel = !identity.TryGetProperty("HideAccountLevel", out var hide) || hide.ValueKind != JsonValueKind.False;
+                    if (!hideLevel && identity.TryGetProperty("AccountLevel", out var lv) && lv.ValueKind == JsonValueKind.Number && lv.TryGetInt32(out var n) && n >= 0) level = n;
+                }
+                players.Add(new(Text(item, "Subject"), Text(item, "TeamID"), Text(item, "CharacterID"), incognito, hideLevel, level));
+            }
+        return new(matchId, Text(root, "MapID"), Text(root, "ModeID"), players);
+    }
     public async Task<string?> GetPartyState(CancellationToken ct)
     {
         var current = CurrentSession;
@@ -477,16 +612,14 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         var current = CurrentSession;
         if (!await HasMatchingLocalAccount(current, ct)) return null;
         var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VALORANT", "Saved", "Logs", "ShooterGame.log");
-        try
-        {
-            return CharacterSelectReadyFromLog(ReadTailShared(path, 512 * 1024), matchId);
-        }
-        // A matching local client is present, so do not pick before its screen state can be read.
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+        return logTracker.Check(path, matchId);
     }
     private async Task<bool> HasMatchingLocalAccount(RiotSession current, CancellationToken ct)
     {
         var subject = current.Subject;
+        var wsSubject = Volatile.Read(ref localEventConnectedSubject);
+        if (wsSubject.Length > 0 && string.Equals(wsSubject, subject, StringComparison.OrdinalIgnoreCase))
+            return CurrentSession.Subject.Equals(subject, StringComparison.OrdinalIgnoreCase);
         if (!string.Equals(readinessSubject, subject, StringComparison.OrdinalIgnoreCase) || DateTimeOffset.UtcNow >= readinessConnectionCheck)
         {
             readinessLocalAccount = await GetLocalEventConnection(subject, ct) != null;
@@ -504,8 +637,9 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     }
     internal static string? GameFlowStateFromLog(string log)
     {
-        var states = Regex.Matches(log, @"LogGameFlowStateManager:.*Broadcasting state changed to ([A-Za-z0-9_]+)");
-        return states.Count == 0 ? null : states[^1].Groups[1].Value;
+        string? latest = null;
+        foreach (Match match in GameFlowRegex.Matches(log)) latest = match.Groups[1].Value;
+        return latest;
     }
     internal static bool? CharacterSelectReadyFromLog(string log, string matchId)
     {
@@ -518,8 +652,11 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
     {
         ValidateId(matchId);
         var current = CurrentSession;
-        using var result = await Request(HttpMethod.Get, $"/pregame/v1/matches/{matchId}", false, ct, sessionSnapshot: current);
-        var root = result!.RootElement;
+        using var result = await Request(HttpMethod.Get, $"/pregame/v1/matches/{matchId}", false, ct, sessionSnapshot: current, timeout: PregameRequestTimeout);
+        return ParseMatchSnapshot(result!.RootElement);
+    }
+    private static MatchSnapshot ParseMatchSnapshot(JsonElement root)
+    {
         if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException("マッチ情報が不正です");
         var players = new List<Player>();
         if (root.TryGetProperty("AllyTeam", out var team) && team.ValueKind == JsonValueKind.Object && team.TryGetProperty("Players", out var list))
@@ -529,8 +666,30 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         }
         return new(Text(root, "ID"), Text(root, "PregameState"), players, Text(root, "MapID"));
     }
-    public async Task Select(string matchId, string agentId, CancellationToken ct) => await Write("select", matchId, agentId, ct);
-    public async Task Lock(string matchId, string agentId, CancellationToken ct) => await Write("lock", matchId, agentId, ct);
+    private static MatchSnapshot? TryParseMatchSnapshot(JsonElement root, string expectedMatchId)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        var id = Text(root, "ID");
+        if (!string.Equals(id, expectedMatchId, StringComparison.OrdinalIgnoreCase)) return null;
+        if (!root.TryGetProperty("AllyTeam", out var team) || team.ValueKind != JsonValueKind.Object ||
+            !team.TryGetProperty("Players", out var list) || list.ValueKind != JsonValueKind.Array)
+            return null;
+        var players = list.EnumerateArray().Select(p => new Player(Text(p, "Subject"), Text(p, "CharacterID"), Text(p, "CharacterSelectionState"))).ToList();
+        return new MatchSnapshot(id, Text(root, "PregameState"), players, Text(root, "MapID"));
+    }
+    public async Task Select(string matchId, string agentId, CancellationToken ct)
+    {
+        using var _ = await Write("select", matchId, agentId, ct);
+    }
+    public async Task Lock(string matchId, string agentId, CancellationToken ct)
+    {
+        using var _ = await Write("lock", matchId, agentId, ct);
+    }
+    public async Task<MatchSnapshot?> LockAndConfirm(string matchId, string agentId, CancellationToken ct)
+    {
+        using var result = await Write("lock", matchId, agentId, ct);
+        return result == null ? null : TryParseMatchSnapshot(result.RootElement, matchId);
+    }
     public async Task<bool> IsInMatch(CancellationToken ct)
     {
         var current = CurrentSession;
@@ -578,10 +737,10 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         ValidateId(partyId);
         using var result = await Request(HttpMethod.Post, $"/parties/v1/parties/{partyId}/matchmaking/leave", false, ct);
     }
-    private async Task Write(string action, string matchId, string agentId, CancellationToken ct)
+    private async Task<JsonDocument?> Write(string action, string matchId, string agentId, CancellationToken ct)
     {
         ValidateId(matchId); ValidateId(agentId);
-        using var result = await Request(HttpMethod.Post, $"/pregame/v1/matches/{matchId}/{action}/{agentId}", false, ct);
+        return await Request(HttpMethod.Post, $"/pregame/v1/matches/{matchId}/{action}/{agentId}", false, ct, timeout: PregameRequestTimeout);
     }
     private static void ValidateId(string id) { if (!Guid.TryParse(id, out _)) throw new InvalidDataException("識別情報が不正です"); }
     private static string[] StringArray(JsonElement element, string name)
@@ -622,4 +781,94 @@ public sealed class RiotApi : IGameApi, IQueueApi, IDisposable
         return "";
     }
     public void Dispose() { Logout(); remote.Dispose(); local.Dispose(); }
+}
+
+internal sealed class CharacterSelectLogTracker
+{
+    private const int TailBytes = 512 * 1024;
+    private const int MaxTransientReadFailures = 5;
+    private readonly object gate = new();
+    private string trackedMatchId = "";
+    private bool matchIdSeen;
+    private string lastPath = "";
+    private long lastLength = -1;
+    private DateTime lastWriteUtc = DateTime.MinValue;
+    private bool? cachedResult;
+    private int consecutiveReadFailures;
+
+    internal void Reset()
+    {
+        lock (gate)
+        {
+            trackedMatchId = "";
+            matchIdSeen = false;
+            lastPath = "";
+            lastLength = -1;
+            lastWriteUtc = DateTime.MinValue;
+            cachedResult = null;
+            consecutiveReadFailures = 0;
+        }
+    }
+
+    internal bool? Check(string path, string matchId)
+    {
+        lock (gate)
+        {
+            if (!string.Equals(trackedMatchId, matchId, StringComparison.OrdinalIgnoreCase))
+            {
+                trackedMatchId = matchId;
+                matchIdSeen = false;
+                lastLength = -1;
+                lastWriteUtc = DateTime.MinValue;
+                cachedResult = null;
+                consecutiveReadFailures = 0;
+            }
+            try
+            {
+                var info = new FileInfo(path);
+                if (!info.Exists)
+                {
+                    consecutiveReadFailures++;
+                    return consecutiveReadFailures <= MaxTransientReadFailures ? false : null;
+                }
+                var length = info.Length;
+                var modified = info.LastWriteTimeUtc;
+                if (string.Equals(lastPath, path, StringComparison.OrdinalIgnoreCase) &&
+                    length == lastLength && modified == lastWriteUtc && cachedResult.HasValue)
+                {
+                    consecutiveReadFailures = 0;
+                    return cachedResult;
+                }
+                var log = RiotApi.ReadTailShared(path, TailBytes);
+                consecutiveReadFailures = 0;
+                if (!matchIdSeen && log.Contains(matchId, StringComparison.OrdinalIgnoreCase))
+                    matchIdSeen = true;
+                var state = RiotApi.GameFlowStateFromLog(log);
+                bool? result = state == null
+                    ? null
+                    : string.Equals(state, "Pregame", StringComparison.Ordinal) && matchIdSeen;
+                var after = new FileInfo(path);
+                if (after.Exists && after.Length == length && after.LastWriteTimeUtc == modified)
+                {
+                    lastPath = path;
+                    lastLength = length;
+                    lastWriteUtc = modified;
+                    cachedResult = result;
+                }
+                else
+                {
+                    lastLength = -1;
+                    cachedResult = null;
+                }
+                return result;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                lastLength = -1;
+                cachedResult = null;
+                consecutiveReadFailures++;
+                return consecutiveReadFailures <= MaxTransientReadFailures ? false : null;
+            }
+        }
+    }
 }

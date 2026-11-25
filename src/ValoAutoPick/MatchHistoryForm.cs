@@ -44,10 +44,16 @@ public sealed class MatchHistoryControl : UserControl
     private readonly ThemedButton careerTab = new() { Text = "成績分析", Size = new(144, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab };
     private readonly ThemedButton mapTab = new() { Text = "マップ別", Size = new(128, 34), Compact = true, Variant = ButtonVariant.Tab, Selected = true };
     private readonly ThemedButton agentTab = new() { Text = "エージェント別", Size = new(164, 34), Compact = true, Variant = ButtonVariant.Tab };
+    private readonly ThemedButton trendTab = new() { Text = "推移", Size = new(96, 34), Compact = true, Variant = ButtonVariant.Tab };
+    private readonly MatchTrendChart trendChart = new() { Dock = DockStyle.Fill };
+    private readonly Panel trendPage = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly Label todaySummary = NativePageStyle.Label("", NativePageStyle.Small, Theme.Muted);
+    private string trendMetric = "ACS";
     private readonly ThemedButton scoreboardTab = new() { Text = "スコアボード", Size = new(156, 34), Compact = true, Variant = ButtonVariant.Tab, Selected = true };
     private readonly ThemedButton roundsTab = new() { Text = "ラウンド別", Size = new(136, 34), Compact = true, Variant = ButtonVariant.Tab };
     private readonly ThemedButton matchAnalysisTab = new() { Text = "ファースト・武器", Size = new(184, 34), Compact = true, Variant = ButtonVariant.Tab };
-    private readonly ThemedSelect modeFilter = new(["すべてのモード"]) { AccessibleName = "モードで絞り込み", AccessibleDescription = "試合一覧と成績分析を選んだモードの試合だけで表示します" };
+    private readonly ThemedSelect modeFilter = new(["すべてのモード"]) { AccessibleName = "モードで絞り込み", AccessibleDescription = "試合一覧を選んだモードの試合だけで表示します" };
+    private readonly Label competitiveOnlyLabel = NativePageStyle.Label("コンペティティブのみ", NativePageStyle.SmallBold, Theme.Muted);
     // Queue id per modeFilter item; null = all modes, "" = matches whose mode is unknown.
     private string?[] modeFilterIds = [null];
     private string? selectedMode;
@@ -474,7 +480,7 @@ public sealed class MatchHistoryControl : UserControl
         }
     }
 
-    public async Task ActivatePageAsync()
+    public async Task ActivatePageAsync(bool silent = false)
     {
         if (IsDisposed || shuttingDown) return;
         UpdateEmptyLogin();
@@ -501,7 +507,7 @@ public sealed class MatchHistoryControl : UserControl
         }
         if (generation != loadGeneration || IsDisposed || !CanSync || loading ||
             DateTimeOffset.UtcNow - latestSync < TimeSpan.FromSeconds(30)) return;
-        await LoadNextPageAsync(refresh: true);
+        await LoadNextPageAsync(refresh: true, silent: silent);
     }
 
     private async Task LoadArchiveAsync(string subject, int generation, CancellationTokenSource operation)
@@ -571,6 +577,7 @@ public sealed class MatchHistoryControl : UserControl
     }
 
     internal void ShowCareerForPreview() => ShowMainPage(history: false);
+    internal void ShowTrendForPreview() { ShowMainPage(history: false); ShowTrend(); }
     internal void ShowNextHistoryPageForPreview()
     {
         if (!matchNext.Enabled) return;
@@ -714,11 +721,13 @@ public sealed class MatchHistoryControl : UserControl
         using var redraw = PageRedrawScope.Begin(historyPage.Parent!);
         historyPage.Visible = history;
         careerPage.Visible = !history;
+        modeFilter.Visible = history;
+        competitiveOnlyLabel.Visible = !history;
         historyTab.Selected = history;
         careerTab.Selected = !history;
         historyPage.Parent?.PerformLayout();
         (history ? historyPage : careerPage).PerformLayout();
-        if (!history) ShowAnalysisChart(mapTab.Selected);
+        if (!history && !trendTab.Selected) ShowAnalysisChart(mapTab.Selected);
     }
 
     private Control BuildCareerPage()
@@ -727,7 +736,7 @@ public sealed class MatchHistoryControl : UserControl
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             BackColor = Theme.Background,
             Margin = Padding.Empty,
             Padding = Padding.Empty
@@ -735,6 +744,8 @@ public sealed class MatchHistoryControl : UserControl
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var metricsRow = new RowStyle(SizeType.Absolute, 144);
         layout.RowStyles.Add(metricsRow);
+        var todayRow = new RowStyle(SizeType.Absolute, 0);
+        layout.RowStyles.Add(todayRow);
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.Controls.Add(BuildMetrics(), 0, 0);
@@ -765,9 +776,14 @@ public sealed class MatchHistoryControl : UserControl
             Padding = Padding.Empty
         };
         mapTab.Margin = new Padding(0, 0, 6, 0);
-        agentTab.Margin = Padding.Empty;
+        agentTab.Margin = new Padding(0, 0, 6, 0);
+        trendTab.Margin = Padding.Empty;
         tabs.Controls.Add(mapTab);
         tabs.Controls.Add(agentTab);
+        tabs.Controls.Add(trendTab);
+        todaySummary.Dock = DockStyle.Fill;
+        todaySummary.AutoSize = false;
+        todaySummary.TextChanged += (_, _) => todayRow.Height = todaySummary.Text.Length == 0 ? 0 : NativePageStyle.TextHeight(layout, todaySummary.Font, verticalPadding: UiMetrics.TightGap);
 
         var mapCard = BreakdownCard("MAP PERFORMANCE", mapRows, mapPrevious, mapPageLabel, mapNext);
         var agentCard = BreakdownCard("AGENT PERFORMANCE", agentRows, agentPrevious, agentPageLabel, agentNext);
@@ -775,10 +791,27 @@ public sealed class MatchHistoryControl : UserControl
         agentChartPage.Controls.Add(agentCard);
         analysisChartHost.Controls.Add(agentChartPage);
         analysisChartHost.Controls.Add(mapChartPage);
+        var trendCard = NativePageStyle.Card();
+        trendCard.Dock = DockStyle.Fill;
+        trendCard.Padding = new Padding(UiMetrics.Px(this, UiMetrics.ContentGap));
+        var metricBar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = UiMetrics.Px(this, 44), WrapContents = false, AutoScroll = true, BackColor = Theme.Surface };
+        foreach (var name in new[] { "ACS", "ADR", "HS%", "K/D", "RR推移" })
+        {
+            var chip = new ThemedButton { Text = name, Size = new Size(UiMetrics.Px(this, 92), UiMetrics.Px(this, 34)), Compact = true, Variant = ButtonVariant.Chip, Selected = name == trendMetric };
+            chip.Click += (_, _) => { trendMetric = name; foreach (Control control in metricBar.Controls) if (control is ThemedButton button) button.Selected = button == chip; UpdateTrend(); };
+            metricBar.Controls.Add(chip);
+        }
+        trendChart.MapName = MapName;
+        trendChart.RankName = RankName;
+        trendCard.Controls.Add(trendChart); trendCard.Controls.Add(metricBar);
+        trendPage.Controls.Add(trendCard);
+        analysisChartHost.Controls.Add(trendPage);
         mapTab.Click += (_, _) => ShowAnalysisChart(map: true);
         agentTab.Click += (_, _) => ShowAnalysisChart(map: false);
-        layout.Controls.Add(tabs, 0, 1);
-        layout.Controls.Add(analysisChartHost, 0, 2);
+        trendTab.Click += (_, _) => ShowTrend();
+        layout.Controls.Add(todaySummary, 0, 1);
+        layout.Controls.Add(tabs, 0, 2);
+        layout.Controls.Add(analysisChartHost, 0, 3);
         return layout;
     }
 
@@ -787,6 +820,8 @@ public sealed class MatchHistoryControl : UserControl
         using var redraw = PageRedrawScope.Begin(analysisChartHost);
         mapChartPage.Visible = map;
         agentChartPage.Visible = !map;
+        trendPage.Visible = false;
+        trendTab.Selected = false;
         mapTab.Selected = map;
         agentTab.Selected = !map;
         analysisChartHost.PerformLayout();
@@ -794,6 +829,22 @@ public sealed class MatchHistoryControl : UserControl
         if (matches.Count == 0) return;
         if (map) RenderBreakdowns(mapRows, lastMapEntries, lastHistoryRows, map: true);
         else RenderBreakdowns(agentRows, lastAgentEntries, lastHistoryRows, map: false);
+    }
+
+    private void ShowTrend()
+    {
+        mapChartPage.Visible = agentChartPage.Visible = false;
+        mapTab.Selected = agentTab.Selected = false;
+        trendTab.Selected = true;
+        trendPage.Visible = true;
+        trendPage.BringToFront();
+        UpdateTrend();
+    }
+
+    private void UpdateTrend()
+    {
+        trendChart.Metric = trendMetric;
+        trendChart.SetPoints(MatchAnalyticsEngine.Trend(MatchAnalyticsEngine.CompetitiveOnly(matches), HistorySubject, trendMetric));
     }
 
     private Control BuildHeader()
@@ -808,7 +859,10 @@ public sealed class MatchHistoryControl : UserControl
         actions.Controls.Add(refreshButton);
         actions.Controls.Add(loadMoreButton);
         pageStatus.AutoEllipsis = true;
-        header.Controls.Add(modeFilter); header.Controls.Add(actions); header.Controls.Add(pageStatus);
+        competitiveOnlyLabel.AutoSize = false;
+        competitiveOnlyLabel.Visible = false;
+        competitiveOnlyLabel.TextAlign = ContentAlignment.MiddleLeft;
+        header.Controls.Add(modeFilter); header.Controls.Add(competitiveOnlyLabel); header.Controls.Add(actions); header.Controls.Add(pageStatus);
         void Place()
         {
             var s = new Func<int, int>(value => UiMetrics.Px(header, value));
@@ -817,6 +871,7 @@ public sealed class MatchHistoryControl : UserControl
             var actionsLeft = Math.Max(0, header.ClientSize.Width - actionsWidth);
             var contentHeight = Math.Max(0, header.ClientSize.Height - s(UiMetrics.ControlGap));
             modeFilter.Location = new Point(0, Math.Max(0, contentHeight - modeFilter.Height));
+            competitiveOnlyLabel.Bounds = modeFilter.Bounds;
             var statusLeft = modeFilter.Right + s(UiMetrics.ContentGap);
             pageStatus.Bounds = new Rectangle(statusLeft, 0, Math.Max(0, actionsLeft - s(UiMetrics.ContentGap) - statusLeft), header.ClientSize.Height);
             actions.Location = new Point(actionsLeft, Math.Max(0, contentHeight - actions.Height));
@@ -1030,7 +1085,10 @@ public sealed class MatchHistoryControl : UserControl
 
         var matchAnalysis = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = Theme.Surface, Margin = Padding.Empty };
         matchAnalysis.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        matchAnalysis.RowStyles.Add(new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 112)));
+        var openerTileHeight = NativePageStyle.TextHeight(this, firstKillValue.Font, verticalPadding: 2)
+            + NativePageStyle.TextHeight(this, NativePageStyle.Reading, verticalPadding: 2)
+            + UiMetrics.Px(this, 22); // Space between labels, inside the border, and around the card.
+        matchAnalysis.RowStyles.Add(new RowStyle(SizeType.Absolute, Math.Max(UiMetrics.Px(this, 112), 32 + openerTileHeight)));
         matchAnalysis.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var openerPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = Theme.Surface, Margin = Padding.Empty };
         openerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -1469,23 +1527,34 @@ public sealed class MatchHistoryControl : UserControl
         await LoadNextPageAsync(refresh: true);
     }
 
-    private Task LoadNextPageAsync(bool refresh = false)
+    internal async Task SyncAfterMatchAsync(string subject)
+    {
+        if (IsDisposed || shuttingDown || !string.Equals(api.Subject, subject, StringComparison.OrdinalIgnoreCase)) return;
+        var started = DateTimeOffset.UtcNow;
+        if (!archiveSubject.Equals(subject, StringComparison.OrdinalIgnoreCase) || !archiveLoaded)
+            await ActivatePageAsync(silent: true);
+        if (activeLoadTask is { } pending) await pending;
+        if (latestSync < started && !IsDisposed && !shuttingDown && CanSync && api.Subject.Equals(subject, StringComparison.OrdinalIgnoreCase))
+            await LoadNextPageAsync(refresh: true, silent: true);
+    }
+
+    private Task LoadNextPageAsync(bool refresh = false, bool silent = false)
     {
         if (IsDisposed || shuttingDown || loading || (!refresh && !hasMore)) return Task.CompletedTask;
         if (!CanSync)
         {
-            SetStatus("試合分析を見るには、上部のRiotログインから接続してください。", error: false);
+            if (!silent) SetStatus("試合分析を見るには、上部のRiotログインから接続してください。", error: false);
             return Task.CompletedTask;
         }
 
-        var task = LoadNextPageCoreAsync(refresh);
+        var task = LoadNextPageCoreAsync(refresh, silent);
         activeLoadTask = task;
         _ = task.ContinueWith(completed => Interlocked.CompareExchange(ref activeLoadTask, null, completed),
             CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         return task;
     }
 
-    private async Task LoadNextPageCoreAsync(bool refresh)
+    private async Task LoadNextPageCoreAsync(bool refresh, bool silent)
     {
         if (IsDisposed || shuttingDown) return;
 
@@ -1501,7 +1570,7 @@ public sealed class MatchHistoryControl : UserControl
         else loadMoreButton.Text = "読み込み中…";
         UpdateHistoryButtons();
         var startIndex = refresh ? 0 : nextIndex;
-        SetStatus(startIndex == 0 ? "最近の試合を読み込んでいます…" : "さらに試合を読み込んでいます…", error: false);
+        if (!silent) SetStatus(startIndex == 0 ? "最近の試合を読み込んでいます…" : "さらに試合を読み込んでいます…", error: false);
         if (matches.Count == 0)
         {
             historyEmptyText.Visible = false;
@@ -1512,6 +1581,7 @@ public sealed class MatchHistoryControl : UserControl
         try
         {
             var weaponNamesTask = LoadWeaponNamesAsync(token);
+            var competitiveTask = LoadCompetitiveUpdatesAsync(token);
             var page = await api.GetMatchHistory(startIndex, PageSize, token).WaitAsync(token);
             if (generation != loadGeneration || IsDisposed) return;
             var entriesToLoad = page.Entries.Where(entry => !matchPositions.TryGetValue(entry.MatchId, out var position) ||
@@ -1569,6 +1639,17 @@ public sealed class MatchHistoryControl : UserControl
                 { /* The name lookup timed out; keep the match details. */ }
             }
             if (generation != loadGeneration || IsDisposed) return;
+            var competitiveUpdates = await competitiveTask;
+            if (generation != loadGeneration || IsDisposed) return;
+            foreach (var entry in competitiveUpdates)
+            {
+                if (!matchPositions.TryGetValue(entry.Key, out var index)) continue;
+                var existing = matches[index];
+                var updated = CompetitiveUpdate.Attach(existing.Match, competitiveUpdates);
+                if (updated.CompetitiveUpdate == existing.Match.CompetitiveUpdate) continue;
+                matches[index] = MatchAnalyticsEngine.Analyze(updated);
+                saveQueue.Enqueue(matches[index]);
+            }
             var prepared = parsedDetails.Where(match => match is not null).Select(match =>
             {
                 var details = match!;
@@ -1581,7 +1662,7 @@ public sealed class MatchHistoryControl : UserControl
                     return previous?.FindPlayer(player.Subject) is { GameName.Length: > 0 } old
                         ? player with { GameName = old.GameName, TagLine = old.TagLine } : player;
                 }).ToArray();
-                return details with { Players = players };
+                return CompetitiveUpdate.Attach(details with { Players = players, CompetitiveUpdate = previous?.Match.CompetitiveUpdate }, competitiveUpdates);
             }).ToArray();
             var parsed = await Task.Run(() => prepared.Select(MatchAnalyticsEngine.Analyze).ToArray(), token).WaitAsync(token);
             if (generation != loadGeneration || IsDisposed) return;
@@ -1607,24 +1688,24 @@ public sealed class MatchHistoryControl : UserControl
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
-            if (!lifetime.IsCancellationRequested && !shuttingDown && generation == loadGeneration && !IsDisposed)
+            if (!silent && !lifetime.IsCancellationRequested && !shuttingDown && generation == loadGeneration && !IsDisposed)
                 ShowHistoryLoadError(new TimeoutException(), "試合履歴の取得がタイムアウトしました。「最新に更新」で再試行してください。");
         }
         catch (ApiException ex) when (ex.Status is 401 or 403)
         {
-            if (generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "Riotのログイン期限が切れました。再接続してください。");
+            if (!silent && generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "Riotのログイン期限が切れました。再接続してください。");
         }
         catch (ApiException ex) when (ex.Status == 429)
         {
-            if (generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "Riot側の応答が混み合っています。少し待ってから再読み込みしてください。");
+            if (!silent && generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "Riot側の応答が混み合っています。少し待ってから再読み込みしてください。");
         }
         catch (Exception ex) when (ex is ApiException or HttpRequestException or InvalidDataException or JsonException or InvalidOperationException or TaskCanceledException)
         {
-            if (generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "試合履歴を取得できませんでした。ネット接続とRiotアカウントを確認してください。");
+            if (!silent && generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "試合履歴を取得できませんでした。ネット接続とRiotアカウントを確認してください。");
         }
         catch (Exception ex)
         {
-            if (generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "試合履歴を表示できませんでした。最新に更新してください。");
+            if (!silent && generation == loadGeneration && !IsDisposed && !shuttingDown) ShowHistoryLoadError(ex, "試合履歴を表示できませんでした。最新に更新してください。");
         }
         finally
         {
@@ -1638,6 +1719,14 @@ public sealed class MatchHistoryControl : UserControl
                 UpdateHistoryButtons();
             }
         }
+    }
+
+    private async Task<IReadOnlyDictionary<string, CompetitiveUpdate>> LoadCompetitiveUpdatesAsync(CancellationToken token)
+    {
+        try { return await api.GetCompetitiveUpdates(token).WaitAsync(token); }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException or JsonException or InvalidDataException or InvalidOperationException) { }
+        return new Dictionary<string, CompetitiveUpdate>(StringComparer.OrdinalIgnoreCase);
     }
 
     // After a successful fetch the status line confirms when the list was last brought up to date.
@@ -1717,11 +1806,16 @@ public sealed class MatchHistoryControl : UserControl
     {
         using var redraw = PageRedrawScope.Begin(historyPage);
         UpdateModeFilterItems();
-        // The mode filter narrows the list, the metrics and the map/agent breakdowns alike.
+        // The mode filter applies to history; career analytics always use competitive matches.
         var ordered = OrderedVisibleMatches();
         historyContent.Visible = ordered.Length > 0;
         historyEmptyText.Visible = ordered.Length == 0;
-        var history = MatchAnalyticsEngine.AnalyzeHistory(ordered, HistorySubject);
+        if (ordered.Length == 0) RenderEmptyState("表示できる試合がありません。");
+        var competitive = MatchAnalyticsEngine.CompetitiveOnly(matches).ToArray();
+        var history = MatchAnalyticsEngine.AnalyzeHistory(competitive, HistorySubject);
+        var today = MatchAnalyticsEngine.Today(competitive, HistorySubject, DateTimeOffset.Now, TimeZoneInfo.Local);
+        todaySummary.Text = today.MatchCount == 0 ? "" : $"今日: {today.Wins}勝 {today.Losses}敗 · 平均ACS {Number(today.AverageCombatScore, 0)}";
+        UpdateTrend();
         matchCount.Text = $"{ordered.Length} 試合";
         // Draws are listed only when there are any, so the common W/L case stays compact.
         var record = history.Draws > 0 ? $"{history.Wins}W {history.Losses}L {history.Draws}D" : $"{history.Wins}W {history.Losses}L";
@@ -1743,8 +1837,7 @@ public sealed class MatchHistoryControl : UserControl
         lastHistoryRows = history.MatchesNewestFirst;
         RenderBreakdowns(mapRows, lastMapEntries, lastHistoryRows, map: true);
         RenderBreakdowns(agentRows, lastAgentEntries, lastHistoryRows, map: false);
-        if (ordered.Length == 0) RenderEmptyState("表示できる試合がありません。");
-        else RenderHistorySelection(ordered);
+        if (ordered.Length > 0) RenderHistorySelection(ordered);
         UpdateHistoryButtons();
         historySkeleton.Loading = false;
     }
@@ -1913,13 +2006,16 @@ public sealed class MatchHistoryControl : UserControl
         title.Name = "matchTitle";
         // The result is spelled out next to the score so it never depends on colour alone (draws included).
         var outcome = OutcomeName(me?.Outcome);
+        var rr = match.Match.CompetitiveUpdate?.RankedRatingEarned is { } earned ? $"  {earned:+0;-0;0} RR" : "";
         var score = NativePageStyle.Label(outcome.Length > 0 ? $"{outcome}  {TeamScore(match, me)}" : TeamScore(match, me), NativePageStyle.ReadingBold, accent);
+        var rrBadge = NativePageStyle.Label(rr.Trim(), NativePageStyle.SmallBold, Theme.Text);
+        rrBadge.AutoSize = false; rrBadge.Visible = rr.Length > 0; rrBadge.BackColor = Theme.Highlight; rrBadge.TextAlign = ContentAlignment.MiddleCenter;
         var agent = NativePageStyle.Label(AgentName(me?.CharacterId ?? ""), NativePageStyle.Reading, Theme.Muted);
         var date = NativePageStyle.Label(match.Info.GameStartUtc?.ToLocalTime().ToString("M/d HH:mm") ?? "日時不明", NativePageStyle.Reading, Theme.Muted);
         var kda = NativePageStyle.Label($"K/D/A  {me?.Kills?.ToString() ?? "—"} / {me?.Deaths?.ToString() ?? "—"} / {me?.Assists?.ToString() ?? "—"}", NativePageStyle.Reading, Theme.Text);
         var acs = NativePageStyle.Label($"ACS  {Number(me?.AverageCombatScore, 0)}", NativePageStyle.Reading, Theme.Muted);
         score.TextAlign = date.TextAlign = acs.TextAlign = ContentAlignment.MiddleRight;
-        row.Controls.AddRange([marker, title, score, agent, date, kda, acs]);
+        row.Controls.AddRange([marker, title, score, rrBadge, agent, date, kda, acs]);
 
         void PlaceLine(Label left, Label right, int y, int lineHeight)
         {
@@ -1938,6 +2034,13 @@ public sealed class MatchHistoryControl : UserControl
             var markerInset = UiMetrics.Px(row, 8);
             marker.Bounds = new Rectangle(UiMetrics.Px(row, 5), markerInset, UiMetrics.Px(row, 3), Math.Max(0, row.ClientSize.Height - markerInset * 2));
             PlaceLine(title, score, top, lineHeight);
+            if (rrBadge.Visible)
+            {
+                var gap = UiMetrics.Px(row, UiMetrics.TightGap);
+                var width = Math.Min(rrBadge.PreferredWidth + gap * 2, Math.Max(0, title.Width - gap));
+                rrBadge.Bounds = new Rectangle(Math.Max(title.Left, score.Left - gap - width), top, width, lineHeight);
+                title.Width = Math.Max(0, rrBadge.Left - title.Left - gap);
+            }
             PlaceLine(agent, date, top + lineHeight, lineHeight);
             PlaceLine(kda, acs, top + lineHeight * 2, lineHeight);
         }

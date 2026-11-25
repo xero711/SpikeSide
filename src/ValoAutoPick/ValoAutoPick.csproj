@@ -11,7 +11,7 @@
     <ApplicationIcon>Assets\SpikeSide.ico</ApplicationIcon>
     <AssemblyName>SpikeSide</AssemblyName>
     <RootNamespace>ValoAutoPick</RootNamespace>
-    <Version>1.0.1</Version>
+    <Version>1.1.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>SpikeSide</Product>
     <AssemblyTitle>SpikeSide</AssemblyTitle>

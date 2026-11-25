@@ -12,6 +12,7 @@ public sealed class MainWindow : DarkForm
     // while still leaving the server a reasonable amount of breathing room. The
     // worker is serial, so this never creates overlapping requests.
     private const int FastPollIntervalMilliseconds = 250;
+    private const int PregameRetryIntervalMilliseconds = 250;
     private const int ClientUnavailableIntervalMilliseconds = 1500;
     private const int TransientFailureIntervalMilliseconds = 2500;
 
@@ -25,6 +26,7 @@ public sealed class MainWindow : DarkForm
     private readonly ThemedButton dashboardTab = new() { Text = "ピック", Size = new(92, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab, Selected = true, AccessibleDescription = "Ctrl+1" };
     private readonly ThemedButton matchHistoryButton = new() { Text = "試合分析", Size = new(132, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab, AccessibleDescription = "Ctrl+2" };
     private readonly ThemedButton storeTab = new() { Text = "STORE", Size = new(104, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab, AccessibleDescription = "Ctrl+3" };
+    private readonly ThemedButton liveTab = new() { Text = "ライブ", Size = new(100, UiMetrics.ButtonHeight), Compact = true, Variant = ButtonVariant.Tab, AccessibleDescription = "Ctrl+4" };
     private readonly ThemedButton appSettings = new() { Text = "設定", Size = new(84, UiMetrics.ButtonHeight), Compact = true };
     private readonly ToolTip shortcutTips = new() { InitialDelay = 600 };
     // Window state to return to when reopened from the tray (minimizing hides the window).
@@ -57,8 +59,10 @@ public sealed class MainWindow : DarkForm
     private TrayToggleItem? trayQueueToggle;
     private string trayWarningText = "";
     private readonly RiotApi api = new();
+    private readonly PickDiagnosticsLogger pickDiagnostics = new();
     private MatchHistoryControl? matchHistory;
     private StorePreviewControl? storePreview;
+    private LiveMatchControl? liveMatch;
     private Control? dashboardPage;
     private MainPage selectedPage;
     private readonly CancellationTokenSource lifetime = new();
@@ -168,10 +172,12 @@ public sealed class MainWindow : DarkForm
         dashboardTab.Click += (_, _) => ShowMainPage(MainPage.Dashboard);
         matchHistoryButton.Click += (_, _) => ShowMainPage(MainPage.MatchHistory);
         storeTab.Click += (_, _) => ShowMainPage(MainPage.Store);
+        liveTab.Click += (_, _) => ShowMainPage(MainPage.Live);
         appSettings.Click += (_, _) => ShowSettings();
         shortcutTips.SetToolTip(dashboardTab, "ピック (Ctrl+1)");
         shortcutTips.SetToolTip(matchHistoryButton, "試合分析 (Ctrl+2)");
         shortcutTips.SetToolTip(storeTab, "STORE (Ctrl+3)");
+        shortcutTips.SetToolTip(liveTab, "ライブ (Ctrl+4)");
         start.Click += async (_, _) => await TogglePickMonitoring();
         autoQueue.Click += async (_, _) => await ToggleAutoQueue();
         region.SelectedIndexChanged += async (_, _) => { SaveSettings(); if (api.HasAccountSession) { await SignOut(clearBrowserSession: false); await RestoreAccountSession(ReadSettings()); } };
@@ -271,12 +277,19 @@ public sealed class MainWindow : DarkForm
                 if (Edition.IsTrial && Environment.GetCommandLineArgs().Contains("--preview-trial-exhausted")) { SetTrialRemaining(0); ReportPick("この試合の処理は完了 · 次の試合も自動で検知します"); }
                 Hide(); Show(); TopMost = true; Activate();
                 if (Environment.GetCommandLineArgs().Contains("--preview-connected")) { ApplyAccountLabels(true, "ExamplePlayer#1234"); login.Enabled = false; logout.Visible = true; }
-                if (Environment.GetCommandLineArgs().Contains("--preview-match-history"))
+                if (Environment.GetCommandLineArgs().Contains("--preview-live"))
+                {
+                    ShowMainPage(MainPage.Live);
+                    liveMatch!.ShowPreview();
+                }
+                else if (Environment.GetCommandLineArgs().Contains("--preview-match-history"))
                 {
                     ShowMainPage(MainPage.MatchHistory);
                     await matchHistory!.ActivatePageAsync();
                     if (Environment.GetCommandLineArgs().Contains("--preview-career-tab"))
                         matchHistory!.ShowCareerForPreview();
+                    if (Environment.GetCommandLineArgs().Contains("--preview-trend"))
+                        matchHistory!.ShowTrendForPreview();
                     if (Environment.GetCommandLineArgs().Contains("--preview-history-next"))
                     {
                         await Task.Delay(700);
@@ -364,8 +377,10 @@ public sealed class MainWindow : DarkForm
         dashboardTab.Margin = Padding.Empty;
         matchHistoryButton.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
         storeTab.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
+        liveTab.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
         logout.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0); login.Margin = Padding.Empty;
         navigation.Controls.Add(dashboardTab); navigation.Controls.Add(matchHistoryButton); navigation.Controls.Add(storeTab);
+        navigation.Controls.Add(liveTab);
         appSettings.Margin = new Padding(UiMetrics.Px(this, UiMetrics.ControlGap), 0, 0, 0);
         loginBar.Controls.Add(login); loginBar.Controls.Add(logout); loginBar.Controls.Add(appSettings);
         void PlaceActions()
@@ -628,6 +643,7 @@ public sealed class MainWindow : DarkForm
         dashboardTab.Enabled = !closing;
         matchHistoryButton.Enabled = !closing && !busy;
         storeTab.Enabled = !closing && !busy;
+        liveTab.Enabled = !closing && !busy;
         logout.Visible = api.HasAccountSession;
         login.AccessibleName = api.HasAccountSession ? $"接続済み: {api.AccountName} / {api.RegionLabel}" : loginAttempt != null ? "ログインを中止" : "Riotアカウントにログイン";
         start.Text = stopping ? "停止中…" : pickMonitoring ? "監視を停止" : "監視を開始";
@@ -697,6 +713,7 @@ public sealed class MainWindow : DarkForm
         {
             MainPage.MatchHistory => GetMatchHistory(),
             MainPage.Store => GetStorePreview(),
+            MainPage.Live => GetLiveMatch(),
             _ => dashboardPage!
         };
         pageHost.SuspendLayout();
@@ -714,11 +731,13 @@ public sealed class MainWindow : DarkForm
         {
             MainPage.MatchHistory => "試合分析",
             MainPage.Store => "STORE確認",
+            MainPage.Live => "ライブトラッカー",
             _ => Edition.IsTrial ? "SpikeSide 体験版" : "SpikeSide"
         };
         dashboardTab.Selected = page == MainPage.Dashboard;
         matchHistoryButton.Selected = page == MainPage.MatchHistory;
         storeTab.Selected = page == MainPage.Store;
+        liveTab.Selected = page == MainPage.Live;
         UpdateConnectionUi();
         if (page != MainPage.Dashboard)
             _ = ActivatePageSafelyAsync(page);
@@ -733,10 +752,36 @@ public sealed class MainWindow : DarkForm
         return matchHistory = page;
     }
 
+    private LiveMatchControl GetLiveMatch()
+    {
+        if (liveMatch != null) return liveMatch;
+        var page = new LiveMatchControl(api, agents) { Visible = false, Dock = DockStyle.Fill, TabIndex = 4 };
+        pageHost.Controls.Add(page);
+        return liveMatch = page;
+    }
+
+    private void ScheduleMatchHistorySync()
+    {
+        var subject = api.Subject;
+        _ = SyncAfterMatchAsync(subject);
+    }
+
+    private async Task SyncAfterMatchAsync(string subject)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(8), lifetime.Token);
+            if (closing || !api.HasAccountSession || !string.Equals(subject, api.Subject, StringComparison.OrdinalIgnoreCase)) return;
+            await GetMatchHistory().SyncAfterMatchAsync(subject);
+        }
+        catch (Exception) { /* History sync must not interrupt monitoring. */ }
+    }
+
     private StorePreviewControl GetStorePreview()
     {
         if (storePreview != null) return storePreview;
         var page = new StorePreviewControl(api) { Visible = false, Dock = DockStyle.Fill, TabIndex = 3 };
+        page.WishlistArrival += message => { if (!closing) tray.ShowBalloonTip(5000, "ウィッシュリストに入荷", message, ToolTipIcon.Info); };
         page.LoginRequested += async (_, _) => await SignInFromPage();
         page.LogoutRequested += async (_, _) => await SignOut();
         pageHost.Controls.Add(page);
@@ -763,13 +808,16 @@ public sealed class MainWindow : DarkForm
         }
     }
 
-    private enum MainPage { Dashboard, MatchHistory, Store }
+    private enum MainPage { Dashboard, MatchHistory, Store, Live }
 
     private async Task NotifyEmbeddedPagesAsync()
     {
         var history = selectedPage == MainPage.MatchHistory && matchHistory != null
             ? ActivatePageSafelyAsync(MainPage.MatchHistory) : Task.CompletedTask;
-        await Task.WhenAll(history, storePreview?.NotifyAccountChangedAsync() ?? Task.CompletedTask);
+        await Task.WhenAll(
+            history,
+            storePreview?.NotifyAccountChangedAsync() ?? Task.CompletedTask,
+            liveMatch?.NotifyAccountChangedAsync() ?? Task.CompletedTask);
     }
 
     private async Task LoadOwnedAgents(CancellationToken ct)
@@ -933,12 +981,14 @@ public sealed class MainWindow : DarkForm
         {
             matchHistory?.ResetSession();
             storePreview?.ResetSession();
+            liveMatch?.ResetSession();
             ShowMainPage(MainPage.Dashboard);
             refreshStop?.Cancel();
             await StopMonitor();
             if (accountRefresh != null) { try { await accountRefresh; } catch (OperationCanceledException) { } }
             api.Logout(); ownedAgents = null; ownedSubject = ""; engine = null; engineSubject = "";
             if (storePreview != null) await storePreview.NotifyAccountChangedAsync();
+            if (liveMatch != null) await liveMatch.NotifyAccountChangedAsync();
             if (clearBrowserSession)
             {
                 systemBrowserLogin = false; SaveSettings();
@@ -1094,8 +1144,9 @@ public sealed class MainWindow : DarkForm
     private async Task RunMonitor(Settings settings, CancellationToken ct)
     {
         Report("マッチを検索中");
-        var mapObserver = new MapObserver(api, UpdateMap);
+        var mapObserver = new MapObserver(api, UpdateMap, ScheduleMatchHistorySync);
         using var notificationsStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var pickWake = new SemaphoreSlim(0, 1);
         var queueSignals = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
         Task? notifications = null;
         Task? relayNotifications = null;
@@ -1133,11 +1184,27 @@ public sealed class MainWindow : DarkForm
             var until = DateTimeOffset.UtcNow.AddMilliseconds(milliseconds);
             if (until > queueRetryAfter) queueRetryAfter = until;
         }
+        void WakePickMonitor()
+        {
+            if (!pickMonitoring) return;
+            try { if (pickWake.CurrentCount == 0) pickWake.Release(); }
+            catch (Exception e) when (e is SemaphoreFullException or ObjectDisposedException) { }
+        }
         void QueueChanged()
         {
             if (!autoQueueActive) return;
             queueStateChanged = true;
             queueSignals.Writer.TryWrite(true);
+        }
+        void OnLocalEvent(RiotLocalEvents.Notification notification)
+        {
+            if (notification == RiotLocalEvents.Notification.PregameChanged)
+            {
+                WakePickMonitor();
+                QueueChanged();
+                return;
+            }
+            if (notification == RiotLocalEvents.Notification.QueueChanged) QueueChanged();
         }
         async Task WaitForRetry(CancellationToken token)
         {
@@ -1193,32 +1260,49 @@ public sealed class MainWindow : DarkForm
         {
             while (!ct.IsCancellationRequested && (pickMonitoring || autoQueueActive))
             {
-                var interval = pickMonitoring ? FastPollIntervalMilliseconds : ClientUnavailableIntervalMilliseconds;
+                var interval = pickMonitoring ? (engine?.SuggestedPollIntervalMs ?? FastPollIntervalMilliseconds) : ClientUnavailableIntervalMilliseconds;
                 try
                 {
                     await WaitForRetry(ct);
                     if (!GameStillRunning()) break;
-                    if (DateTimeOffset.UtcNow >= api.ExpiresAt.AddMinutes(-3))
+                    // Proactively refresh tokens while idle in lobby so a slow auth refresh never collides with character select.
+                    var inPregame = engine?.IsPregameActive == true;
+                    var refreshThreshold = engine?.IsInMatch == true ? TimeSpan.FromMinutes(2) : TimeSpan.FromMinutes(12);
+                    var mustRefreshNow = !inPregame
+                        ? DateTimeOffset.UtcNow >= api.ExpiresAt - refreshThreshold
+                        : DateTimeOffset.UtcNow >= api.ExpiresAt.AddSeconds(-30);
+                    if (mustRefreshNow)
                     {
                         Report("ログインを更新中");
                         if (!await RefreshAccountSession(ct))
                         { Report("ログインを再接続中"); if (!await WaitWhileGameRunning(TimeSpan.FromSeconds(30))) break; continue; }
                         UpdateConnectionUi();
                     }
-                    if (autoQueueActive && notifications == null)
+                    if ((pickMonitoring || autoQueueActive) && notifications == null)
+                    {
+                        notifications = RiotLocalEvents.Listen(api, OnLocalEvent, api.SetLocalEventConnected, notificationsStop.Token);
+                    }
+                    if (autoQueueActive && notificationChecks == null)
                     {
                         notificationChecks = ProcessQueueNotifications();
-                        notifications = RiotLocalEvents.Listen(api, QueueChanged, notificationsStop.Token);
                         if (relayOptions is { } options)
                         {
-                            relayNotifications = NotificationRelayClient.Listen(options, () => api.Subject, QueueChanged,
+                            relayNotifications = NotificationRelayClient.Listen(options, () => api.Subject, () => { WakePickMonitor(); QueueChanged(); },
                                 _ => { }, notificationsStop.Token);
                         }
                     }
                     if (pickMonitoring)
                     {
-                        if (engine == null || engineSubject != api.Subject) { engine = new PickEngine(api, ReportPick, api.IsCharacterSelectReady, UpdateMap, Edition.IsTrial ? AuthorizeTrialPick : null, Edition.IsTrial ? CheckTrialMatch : null, agent => ownedSubject == api.Subject && ownedAgents?.Contains(agent) == true); engineSubject = api.Subject; }
+                        if (engine == null || engineSubject != api.Subject)
+                        {
+                            engine = new PickEngine(api, ReportPick, api.IsCharacterSelectReady, UpdateMap,
+                                Edition.IsTrial ? AuthorizeTrialPick : null, Edition.IsTrial ? CheckTrialMatch : null,
+                                agent => ownedSubject == api.Subject && ownedAgents?.Contains(agent) == true,
+                                ScheduleMatchHistorySync, pickDiagnostics.Record);
+                            engineSubject = api.Subject;
+                        }
                         await engine.Tick(settings, DateTimeOffset.UtcNow, ct);
+                        interval = engine.SuggestedPollIntervalMs;
                     }
                     if (autoQueueActive && DateTimeOffset.UtcNow >= nextQueuePulse)
                     {
@@ -1240,14 +1324,23 @@ public sealed class MainWindow : DarkForm
                     var message = e.Status == 429 ? "混雑中 · 自動で再接続します" : e.Status == 404 ? "マッチを検索中" : "接続を再確認中";
                     Report(message);
                     if (autoQueueActive) SetQueueStatus(message);
-                    interval = e.Status == 429 ? e.RetrySeconds * 1000 : TransientFailureIntervalMilliseconds;
+                    interval = e.Status == 429 ? e.RetrySeconds * 1000 : engine?.IsPregameActive == true ? PregameRetryIntervalMilliseconds : TransientFailureIntervalMilliseconds;
                     if (e.Status == 429) Backoff(interval);
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested) { Report("タイムアウト · 再接続中"); if (autoQueueActive) SetQueueStatus("タイムアウト · 再接続中"); interval = TransientFailureIntervalMilliseconds; }
-                catch (HttpRequestException) { Report("ネットワークを再確認中"); if (autoQueueActive) SetQueueStatus("ネットワークを再確認中"); interval = TransientFailureIntervalMilliseconds; }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    Report("タイムアウト · 再接続中"); if (autoQueueActive) SetQueueStatus("タイムアウト · 再接続中");
+                    interval = engine?.IsPregameActive == true ? PregameRetryIntervalMilliseconds : TransientFailureIntervalMilliseconds;
+                }
+                catch (HttpRequestException)
+                {
+                    Report("ネットワークを再確認中"); if (autoQueueActive) SetQueueStatus("ネットワークを再確認中");
+                    interval = engine?.IsPregameActive == true ? PregameRetryIntervalMilliseconds : TransientFailureIntervalMilliseconds;
+                }
                 catch (Exception e) when (e is JsonException or InvalidDataException or KeyNotFoundException)
                 { Report("ゲームの応答を確認できません"); if (autoQueueActive) SetQueueStatus("ゲームの応答を確認できません"); interval = 10000; }
-                await Task.Delay(interval, ct);
+                if (pickMonitoring) await pickWake.WaitAsync(interval, ct);
+                else await Task.Delay(interval, ct);
             }
         }
         catch (OperationCanceledException) { }
@@ -1265,6 +1358,7 @@ public sealed class MainWindow : DarkForm
         finally
         {
             notificationsStop.Cancel();
+            api.SetLocalEventConnected("", false);
             if (notifications != null) { try { await notifications; } catch (Exception) { } }
             if (relayNotifications != null) { try { await relayNotifications; } catch (Exception) { } }
             if (notificationChecks != null) { try { await notificationChecks; } catch (Exception) { } }
@@ -1399,6 +1493,7 @@ public sealed class MainWindow : DarkForm
         SetHero();
         UpdateAgentAccessUi();
         matchHistory?.UpdateAgents(agents);
+        liveMatch?.UpdateAgents(agents);
     }
 
     private void ResolvePendingAgent()
@@ -1454,6 +1549,7 @@ public sealed class MainWindow : DarkForm
             if (key is Keys.D1 or Keys.NumPad1) target = dashboardTab;
             else if (key is Keys.D2 or Keys.NumPad2) target = matchHistoryButton;
             else if (key is Keys.D3 or Keys.NumPad3) target = storeTab;
+            else if (key is Keys.D4 or Keys.NumPad4) target = liveTab;
         }
         if (target != null)
         {

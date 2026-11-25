@@ -1,5 +1,30 @@
 using ValoAutoPick;
 
+if (args.Contains("--probe-live-match"))
+{
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    using var api = new RiotApi();
+    await api.EnsureConnected("auto", timeout.Token);
+    var agents = AgentCatalog.ParseCatalogue(File.ReadAllText("src/ValoAutoPick/agents.json"), trustBaseContent: true);
+    var coreId = await api.GetCoreMatchId(timeout.Token);
+    var pregameId = coreId == null ? await api.GetMatchId(timeout.Token) : null;
+    Console.WriteLine($"Connected: running={RiotApi.IsValorantRunning()}, region={api.RegionLabel}, coreMatch={coreId != null}, pregameMatch={pregameId != null}");
+    if (coreId != null)
+    {
+        var roster = await api.GetCoreLiveRoster(coreId, timeout.Token);
+        if (roster != null)
+        {
+            var score = await api.GetLocalLiveScore(roster.MapId, timeout.Token);
+            var state = new LiveMatchState();
+            state.ReplaceRoster(roster, api.Subject, "Self", agents);
+            if (score is { } s) state.SetScore(s.Allies, s.Enemies);
+            Console.WriteLine($"Live Match: map={MapCatalog.Name(roster.MapId)} ({roster.MapId}), mode={roster.ModeId}, players={roster.Players.Count}, score={(score is { } sc ? $"{sc.Allies}:{sc.Enemies}" : "none")}");
+            foreach (var pair in state.Players)
+                Console.WriteLine($"  slot={pair.Key} agent={LiveMatchState.Text(pair.Value, "character")} team={LiveMatchState.Text(pair.Value, "teammate")} level={LiveMatchState.Text(pair.Value, "account_level")} label={LiveMatchState.Text(pair.Value, "name")}");
+        }
+    }
+    return 0;
+}
 if (args.Contains("--probe-browser-owned-agents"))
 {
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -29,6 +54,21 @@ var tests = new List<(string, Func<Task>)>();
 var now = DateTimeOffset.UtcNow;
 Settings Config() => new() { AgentId = "agent-a" };
 void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"Expected {expected}, got {actual}"); }
+tests.Add(("live tracker merges event updates and clears old match players", () => {
+    var state = new LiveMatchState();
+    state.Apply("""{"info":{"match_info":{"map":"Ascent","match_id":"one","roster_0":"{\"name\":\"Jett\",\"player_id\":\"p1\",\"teammate\":true}"}}}""");
+    state.Apply("""{"feature":"match_info","category":"match_info","key":"scoreboard_0","data":"{\"player_id\":\"p1\",\"kills\":11,\"deaths\":5}"}""");
+    state.Apply("""{"events":[{"name":"match_start","data":""}]}""");
+    Equal("Jett", LiveMatchState.Text(state.Players["0"], "name"));
+    Equal("11", LiveMatchState.Text(state.Players["0"], "kills"));
+    state.Apply("""{"events":[{"name":"match_end","data":""}]}""");
+    Equal(true, state.MatchEnded);
+    state.Apply("""{"feature":"match_info","key":"match_id","value":"two"}""");
+    Equal(0, state.Players.Count); Equal(false, state.MatchEnded);
+    state.Apply("""{"key":"scoreboard_1","data":"not json"}""");
+    Equal(0, state.Players.Count);
+    return Task.CompletedTask;
+}));
 tests.Add(("storefront accepts absent accessories and null offer arrays", () => {
     const string payload = """{"SkinsPanelLayout":{"SingleItemStoreOffers":null,"SingleItemOffersRemainingDurationInSeconds":0},"AccessoryStore":null,"FeaturedBundle":{"Bundles":null,"BundleRemainingDurationInSeconds":0},"BonusStore":{"BonusStoreOffers":null,"BonusStoreRemainingDurationInSeconds":0}}""";
     var parsed = StorefrontParser.Parse(payload);
@@ -59,6 +99,18 @@ tests.Add(("match history requests an exclusive end index", async () => {
     transport.HistoryResponse = """{"Total":11,"History":[{"MatchID":"bad","GameStartTime":1},{"MatchID":"22222222-2222-2222-2222-222222222222","GameStartTime":1}]}""";
     var page = await api.GetMatchHistory(0, 10, default);
     Equal(1, page.Entries.Count); Equal(2, page.RawCount); Equal<int?>(11, page.Total);
+}));
+tests.Add(("wallet and competitive updates use authenticated player-data endpoints", async () => {
+    var transport = new Transport(); using var api = new RiotApi(transport);
+    await api.Login(new AuthResult("fake-access", "fake-id", now.AddHours(1)), "auto", default);
+    await api.GetWallet(default);
+    Equal("pd.na.a.pvp.net", transport.Calls[^1].Uri.Host);
+    Equal("/store/v1/wallet/11111111-1111-1111-1111-111111111111", transport.Calls[^1].Uri.AbsolutePath);
+    Equal(HttpMethod.Get, transport.Calls[^1].Method); Equal("Bearer fake-access", transport.Calls[^1].Authorization);
+    await api.GetCompetitiveUpdates(default);
+    Equal("pd.na.a.pvp.net", transport.Calls[^1].Uri.Host);
+    Equal("/mmr/v1/players/11111111-1111-1111-1111-111111111111/competitiveupdates", transport.Calls[^1].Uri.AbsolutePath);
+    Equal("?startIndex=0&endIndex=20&queue=competitive", transport.Calls[^1].Uri.Query);
 }));
 tests.Add(("match history paging handles refresh, short pages and server totals", () => {
     Equal((10, false), MatchHistoryPaging.Advance(0, true, true, 0, 10, 0, null));
@@ -314,6 +366,14 @@ tests.Add(("pregame map remains during transition and core game then clears in l
     api.CoreMatchId = null; api.PartyState = "DEFAULT"; api.LocalFlow = "MainMenu";
     await engine.Tick(Config(), now.AddMinutes(5).AddSeconds(2), default); Equal("", seen[^1]);
 }));
+tests.Add(("match-ended callback fires once only after a confirmed core-game return", async () => {
+    var api = new Fake { MatchId = null, CoreMatchId = "match-1", PartyState = "IN_GAME" }; var count = 0;
+    var lifecycle = new MapLifecycle(api, null, () => count++);
+    await lifecycle.ObserveWithoutPregame(now, default); Equal(true, lifecycle.InCoreGame); Equal(0, count);
+    api.CoreMatchId = null; api.PartyState = "DEFAULT"; api.LocalFlow = "MainMenu";
+    await lifecycle.ObserveWithoutPregame(now.AddSeconds(2), default); Equal(1, count);
+    await lifecycle.ObserveWithoutPregame(now.AddSeconds(4), default); Equal(1, count);
+}));
 tests.Add(("queue-only observer retains map during match and clears after return", async () => {
     var api = new Fake { MapId = "/Game/Maps/Pitt/Pitt" }; var seen = new List<string>(); var observer = new MapObserver(api, seen.Add);
     await observer.Tick(default, now); api.MatchId = null; api.CoreMatchId = "match-1"; api.PartyState = "IN_GAME";
@@ -335,6 +395,47 @@ tests.Add(("core-game API reads match ID map and current party state", async () 
     var coreId = await api.GetCoreMatchId(default); Equal("22222222-2222-2222-2222-222222222222", coreId);
     Equal("/Game/Maps/Ascent/Ascent", await api.GetCoreMapId(coreId!, default)); Equal("DEFAULT", await api.GetPartyState(default));
     transport.CoregameAvailable = false; Equal<string?>(null, await api.GetCoreMatchId(default));
+}));
+tests.Add(("live roster preserves privacy flags and rejects a different match", () => {
+    const string id = "22222222-2222-2222-2222-222222222222";
+    using var json = System.Text.Json.JsonDocument.Parse("""{"MatchID":"22222222-2222-2222-2222-222222222222","MapID":"Ascent","ModeID":"competitive","Players":[{"Subject":"11111111-1111-1111-1111-111111111111","TeamID":"Blue","CharacterID":"agent-a","PlayerIdentity":{"Incognito":true,"HideAccountLevel":true,"AccountLevel":99}},{"Subject":"33333333-3333-3333-3333-333333333333","TeamID":"Red","CharacterID":"agent-b","PlayerIdentity":{"Incognito":false,"HideAccountLevel":false,"AccountLevel":21}},{"Subject":"44444444-4444-4444-4444-444444444444","IsCoach":true}]}""");
+    var match = RiotApi.ParseCoreLiveRoster(json.RootElement, id);
+    Equal(2, match.Players.Count); Equal(true, match.Players[0].Incognito); Equal<int?>(null, match.Players[0].AccountLevel);
+    Equal(false, match.Players[1].Incognito); Equal<int?>(21, match.Players[1].AccountLevel);
+    var state = new LiveMatchState();
+    state.ReplaceRoster(match, "33333333-3333-3333-3333-333333333333", "自分", [new Agent("agent-a", "ジェット", ""), new Agent("agent-b", "セージ", "")]);
+    Equal("非表示", LiveMatchState.Text(state.Players["0"], "name")); Equal("自分", LiveMatchState.Text(state.Players["1"], "name"));
+    Equal("", LiveMatchState.Text(state.Players["0"], "account_level")); Equal("21", LiveMatchState.Text(state.Players["1"], "account_level"));
+    var failed = false; try { RiotApi.ParseCoreLiveRoster(json.RootElement, "another"); } catch (InvalidDataException) { failed = true; }
+    Equal(true, failed); return Task.CompletedTask;
+}));
+tests.Add(("live score uses only matching local in-game presence and map", () => {
+    const string subject = "11111111-1111-1111-1111-111111111111";
+    var payload = System.Text.Json.JsonSerializer.Serialize(new { matchPresenceData = new { sessionLoopState = "INGAME", matchMap = "/Game/Maps/Ascent/Ascent" }, partyOwnerMatchScoreAllyTeam = 4, partyOwnerMatchScoreEnemyTeam = 3 });
+    var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(payload));
+    using var document = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new { presences = new[] { new { puuid = subject, product = "valorant", @private = encoded } } }));
+    Equal<(int, int)?>((4, 3), RiotApi.ParseLocalLiveScore(document.RootElement, subject, "Ascent"));
+    Equal<(int, int)?>(null, RiotApi.ParseLocalLiveScore(document.RootElement, subject, "Port"));
+    Equal<(int, int)?>(null, RiotApi.ParseLocalLiveScore(document.RootElement, "another", "Ascent"));
+    Equal<(int, int)?>(null, RiotApi.ParseLocalLiveScore(document.RootElement, subject, ""));
+    var nestedPayload = System.Text.Json.JsonSerializer.Serialize(new
+    {
+        sessionLoopState = "INGAME",
+        matchPresenceData = new { matchMap = "/Game/Maps/Ascent/Ascent", partyOwnerMatchScoreAllyTeam = 7, partyOwnerMatchScoreEnemyTeam = 5 }
+    });
+    var nestedEncoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(nestedPayload));
+    using var nestedDoc = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new { presences = new[] { new { puuid = subject, product = "valorant", @private = nestedEncoded } } }));
+    Equal<(int, int)?>((7, 5), RiotApi.ParseLocalLiveScore(nestedDoc.RootElement, subject, "Ascent"));
+    return Task.CompletedTask;
+}));
+tests.Add(("live snapshot grace period never expires a healthy poll cycle and always expires an old snapshot", () => {
+    // Invariants only, so the exact grace period stays a tunable choice: a fresh snapshot and the slowest legitimate
+    // poll (two 8 s remote calls plus the 4 s local call) must survive, and a snapshot minutes old must not.
+    Equal(false, LiveMatchState.IsExpired(TimeSpan.Zero));
+    Equal(false, LiveMatchState.IsExpired(TimeSpan.FromSeconds(5)));
+    Equal(false, LiveMatchState.IsExpired(TimeSpan.FromSeconds(20)));
+    Equal(true, LiveMatchState.IsExpired(TimeSpan.FromMinutes(10)));
+    return Task.CompletedTask;
 }));
 tests.Add(("local game flow prevents transient lobby state from clearing the map", async () => {
     var api = new Fake { MapId = "/Game/Maps/Ascent/Ascent", State = "provisioned" }; var seen = new List<string>(); var engine = new PickEngine(api, _ => { }, mapChanged: seen.Add);
@@ -468,6 +569,107 @@ tests.Add(("rate limit is surfaced for worker backoff", async () =>
     try { await engine.Tick(Config(), now, default); throw new Exception("Expected rate limit"); }
     catch (ApiException e) { Equal(429, e.Status); }
     Equal(1, api.Selects);
+}));
+tests.Add(("rate limit preserves retry budget and succeeds once throttling clears", async () =>
+{
+    var api = new Fake { SelectError = 429 }; var engine = new PickEngine(api, _ => { });
+    for (var i = 0; i < 8; i++)
+    {
+        try { await engine.Tick(Config(), now.AddSeconds(i), default); throw new Exception("Expected 429"); }
+        catch (ApiException e) { Equal(429, e.Status); }
+    }
+    api.SelectError = 0;
+    await engine.Tick(Config(), now.AddSeconds(10), default);
+    Equal(1, api.Locks);
+}));
+tests.Add(("readiness wait checks local state at high frequency without hammering remote pregame APIs", async () =>
+{
+    var ready = false; var readyChecks = 0; var api = new Fake();
+    var engine = new PickEngine(api, _ => { }, (_, _) => { readyChecks++; return Task.FromResult<bool?>(ready); });
+    await engine.Tick(Config(), now, default);
+    Equal(1, api.MatchIdCalls); Equal(1, api.MatchCalls); Equal(1, readyChecks);
+    Equal(true, engine.IsAwaitingSelectionReady); Equal(40, engine.SuggestedPollIntervalMs);
+    await engine.Tick(Config(), now.AddMilliseconds(40), default);
+    await engine.Tick(Config(), now.AddMilliseconds(80), default);
+    Equal(1, api.MatchIdCalls); Equal(1, api.MatchCalls); Equal(3, readyChecks);
+    ready = true;
+    await engine.Tick(Config(), now.AddMilliseconds(120), default);
+    Equal(1, api.MatchIdCalls); Equal(1, api.Selects); Equal(1, api.Locks); Equal(false, engine.IsAwaitingSelectionReady);
+}));
+tests.Add(("direct lock response confirms immediately without an extra GetMatch round trip", async () =>
+{
+    var events = new List<PickDiagnosticEvent>();
+    var api = new Fake { DirectLockConfirm = true };
+    var engine = new PickEngine(api, _ => { }, diagnostic: events.Add);
+    await engine.Tick(Config(), now, default);
+    Equal(1, api.Selects); Equal(1, api.Locks); Equal(1, api.MatchCalls);
+    Equal("locked-direct", events.Single().Outcome);
+}));
+tests.Add(("RiotApi LockAndConfirm parses locked player directly from lock response", async () =>
+{
+    var transport = new Transport
+    {
+        MatchResponse = """{"ID":"22222222-2222-2222-2222-222222222222","PregameState":"character_select_active","MapID":"/Game/Maps/Ascent/Ascent","AllyTeam":{"Players":[{"Subject":"11111111-1111-1111-1111-111111111111","CharacterID":"33333333-3333-3333-3333-333333333333","CharacterSelectionState":"locked"}]}}"""
+    };
+    using var api = new RiotApi(transport);
+    await api.Login(new AuthResult("fake-access", "fake-id", now.AddHours(1)), "ap", default);
+    var confirmed = await api.LockAndConfirm("22222222-2222-2222-2222-222222222222", "33333333-3333-3333-3333-333333333333", default);
+    Equal("locked", confirmed?.Allies.Single().CharacterSelectionState);
+}));
+tests.Add(("local events classify pregame RMS and PREGAME presence for instant wake", () =>
+{
+    const string subject = "11111111-1111-1111-1111-111111111111";
+    string? lastPresence = null;
+    byte[] Frame(string uri, object data) => System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new object[] { 8, "OnJsonApiEvent", new { uri, data } });
+    string Encode(string state, string party = "DEFAULT") => Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes($"{{\"sessionLoopState\":\"{state}\",\"partyState\":\"{party}\"}}"));
+    var rmsPregame = Frame("/riot-messaging-service/v1/message/ares-pregame/pregame/v1/matches/id", new { });
+    Equal(RiotLocalEvents.Notification.PregameChanged, RiotLocalEvents.Classify(rmsPregame, subject, ref lastPresence));
+    var presencePregame = Frame("/chat/v4/presences", new { puuid = subject, product = "valorant", @private = Encode("PREGAME") });
+    Equal(RiotLocalEvents.Notification.PregameChanged, RiotLocalEvents.Classify(presencePregame, subject, ref lastPresence));
+    Equal(RiotLocalEvents.Notification.None, RiotLocalEvents.Classify(presencePregame, subject, ref lastPresence));
+    var matchStarting = Frame("/chat/v4/presences", new { puuid = subject, product = "valorant", @private = Encode("MENUS", "MATCHMADE_GAME_STARTING") });
+    Equal(RiotLocalEvents.Notification.PregameChanged, RiotLocalEvents.Classify(matchStarting, subject, ref lastPresence));
+    return Task.CompletedTask;
+}));
+tests.Add(("log tracker remembers match ID across heavy log growth and falls back when log is unreadable", () =>
+{
+    const string id = "22222222-2222-2222-2222-222222222222";
+    var path = Path.GetTempFileName();
+    try
+    {
+        var tracker = new CharacterSelectLogTracker();
+        File.WriteAllText(path, $"RMS /pregame/v1/matches/{id}\nLogGameFlowStateManager: Broadcasting state changed to TransitionToPregame\n");
+        Equal<bool?>(false, tracker.Check(path, id));
+        // Push the match ID past the 512KB tail window before Pregame arrives.
+        File.AppendAllText(path, new string('z', 600 * 1024) + "\nLogGameFlowStateManager: Broadcasting state changed to Pregame\n");
+        Equal<bool?>(true, tracker.Check(path, id));
+        var missing = Path.Combine(Path.GetTempPath(), "missing-shooter-" + Guid.NewGuid().ToString("N") + ".log");
+        var missingTracker = new CharacterSelectLogTracker();
+        for (var i = 0; i < 5; i++) Equal<bool?>(false, missingTracker.Check(missing, id));
+        Equal<bool?>(null, missingTracker.Check(missing, id));
+    }
+    finally { if (File.Exists(path)) File.Delete(path); }
+    return Task.CompletedTask;
+}));
+tests.Add(("pick diagnostics writes redacted timing lines and rotates oversized logs", () =>
+{
+    var folder = Path.Combine(Path.GetTempPath(), "SpikeSide-diag-" + Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(folder, "pick-diagnostics.log");
+    try
+    {
+        var logger = new PickDiagnosticsLogger(path);
+        logger.Record(new PickDiagnosticEvent("22222222-2222-2222-2222-222222222222", "Ascent", "locked-direct", 310, 42, 38, 390, 1));
+        var text = File.ReadAllText(path);
+        Equal(true, text.Contains("match=22222222"));
+        Equal(true, text.Contains("outcome=locked-direct"));
+        Equal(false, text.Contains("22222222-2222-2222-2222-222222222222"));
+        File.WriteAllText(path, new string('a', 260 * 1024));
+        logger.Record(new PickDiagnosticEvent("33333333-3333-3333-3333-333333333333", "Bonsai", "taken", null, null, null, 120, 0));
+        Equal(true, File.Exists(path + ".old"));
+        Equal(true, File.ReadAllText(path).Contains("match=33333333"));
+    }
+    finally { if (Directory.Exists(folder)) Directory.Delete(folder, true); }
+    return Task.CompletedTask;
 }));
 tests.Add(("auto queue joins only the selected eligible queue from the idle lobby", async () =>
 {
@@ -932,6 +1134,77 @@ tests.Add(("remote 404 means idle and Retry-After is retained", async () =>
 MatchDetailsData ParseMatch(string matchInfo) =>
     MatchDetailsParser.Parse($$"""{"matchInfo":{{matchInfo}},"players":[],"teams":[],"roundResults":[]}""").Match
     ?? throw new Exception("match-details payload did not parse");
+tests.Add(("wishlist persists, tolerates corruption, matches offers and suppresses repeated cycles", () => {
+    var root = Path.Combine(Path.GetTempPath(), "wishlist-" + Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(root, "wishlist.json");
+    try {
+        var storage = new WishlistStorage(path); var state = storage.Load();
+        Equal(true, state.NotificationsEnabled); state.SkinIds.Add("skin-a"); storage.Save(state);
+        state = storage.Load(); Equal(true, state.SkinIds.Contains("SKIN-A"));
+        var offer = new StorefrontOffer("offer", "level-a", "type", new Dictionary<string, long>());
+        Equal("skin-a", WishlistStorage.MatchOffers(state, [offer], id => id == "level-a" ? "skin-a" : null).Single());
+        Equal(0, WishlistStorage.MatchOffers(state, [offer], _ => "other").Count);
+        Equal(true, WishlistStorage.ShouldNotify(state, "account:daily", "cycle1", true));
+        state.NotifiedCycles["account:daily"] = "cycle1"; storage.Save(state); state = storage.Load();
+        Equal(false, WishlistStorage.ShouldNotify(state, "account:daily", "cycle1", true));
+        Equal(true, WishlistStorage.ShouldNotify(state, "account:daily", "cycle2", true));
+        state.NotificationsEnabled = false; Equal(false, WishlistStorage.ShouldNotify(state, "account:daily", "cycle2", true));
+        File.WriteAllText(path, "{invalid"); Equal(0, storage.Load().SkinIds.Count);
+    } finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    return Task.CompletedTask;
+}));
+tests.Add(("wallet accepts missing balances without inventing zeros", () => {
+    using var json = System.Text.Json.JsonDocument.Parse("""{"Balances":{"85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741":1200,"e59aa87c-4cbf-517a-5983-6e81511be9b7":35,"85ca954a-41f2-ce94-9b45-8ca3dd39a00d":987}}""");
+    var wallet = WalletBalances.Parse(json.RootElement); Equal<long?>(1200, wallet.VP); Equal<long?>(35, wallet.RP); Equal<long?>(987, wallet.KC);
+    using var missing = System.Text.Json.JsonDocument.Parse("""{"Balances":{"85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741":0}}""");
+    wallet = WalletBalances.Parse(missing.RootElement); Equal<long?>(0, wallet.VP); Equal<long?>(null, wallet.RP); Equal<long?>(null, wallet.KC);
+    return Task.CompletedTask;
+}));
+tests.Add(("competitive updates attach by match ID and survive old and new archives", () => {
+    using var json = System.Text.Json.JsonDocument.Parse("""{"Matches":[{"MatchID":"RANKED","RankedRatingEarned":21,"RankedRatingAfterUpdate":67,"TierAfterUpdate":15}]}""");
+    var updates = CompetitiveUpdate.Parse(json.RootElement); var match = ParseMatch("""{"matchId":"ranked","queueID":"competitive"}""");
+    var attached = CompetitiveUpdate.Attach(match, updates); Equal<int?>(21, attached.CompetitiveUpdate!.RankedRatingEarned);
+    Equal<CompetitiveUpdate?>(null, CompetitiveUpdate.Attach(ParseMatch("""{"matchId":"other","queueID":"competitive"}"""), updates).CompetitiveUpdate);
+    var root = Path.Combine(Path.GetTempPath(), "rr-" + Guid.NewGuid().ToString("N")); var subject = "11111111-1111-1111-1111-111111111111";
+    try {
+        var archive = new MatchHistoryArchive(root); var old = ParseMatch("""{"matchId":"old","queueID":"competitive"}""");
+        archive.Save(subject, new[] { attached, old }.Select(MatchAnalyticsEngine.Analyze), new Dictionary<string,string>(), default);
+        var oldPath = Directory.EnumerateFiles(Path.Combine(root, subject, "matches"), "*.json").Single(p => File.ReadAllText(p).Contains("\"old\""));
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(oldPath))!.AsObject(); node.Remove("CompetitiveUpdate"); File.WriteAllText(oldPath, node.ToJsonString());
+        var loaded = archive.Load(subject, default); Equal(0, loaded.UnreadableCount); Equal<int?>(67, loaded.Matches.Single(m => m.Info.MatchId == "ranked").Match.CompetitiveUpdate!.RankedRatingAfterUpdate);
+        Equal<CompetitiveUpdate?>(null, loaded.Matches.Single(m => m.Info.MatchId == "old").Match.CompetitiveUpdate);
+    } finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    return Task.CompletedTask;
+}));
+tests.Add(("trend orders samples and today uses the supplied local timezone", () => {
+    var subject = "player"; var at = new DateTimeOffset(2026, 11, 25, 3, 0, 0, TimeSpan.Zero);
+    MatchAnalytics Make(string id, DateTimeOffset start, bool win, int score) {
+        var data = new MatchDetailsData(new MatchInfoData(id, "map", "competitive", start.ToUnixTimeMilliseconds(), null, ""),
+            [new MatchPlayerData(subject, "", "", "blue", "agent", new MatchPlayerStatsData(score, 10, 5, 2, 10))],
+            [new MatchTeamData("blue", win, win ? 13 : 5), new MatchTeamData("red", !win, win ? 5 : 13)], [], []);
+        return MatchAnalyticsEngine.Analyze(data);
+    }
+    var matches = new[] { Make("new", at, true, 2200), Make("old", at.AddDays(-1), false, 1800) };
+    var trend = MatchAnalyticsEngine.Trend(matches, subject, "ACS"); Equal("old,new", string.Join(',', trend.Select(p => p.MatchId))); Equal(220d, trend[1].Value);
+    var today = MatchAnalyticsEngine.Today(matches, subject, at, TimeZoneInfo.Utc); Equal(1, today.MatchCount); Equal(1, today.Wins); Equal<double?>(220, today.AverageCombatScore);
+    return Task.CompletedTask;
+}));
+tests.Add(("career analytics exclude other modes and retain RR tier and delta", () => {
+    var subject = "player"; var at = new DateTimeOffset(2026, 11, 25, 3, 0, 0, TimeSpan.Zero);
+    MatchAnalytics Make(string id, string queue, int score, bool win, int? tier, int? rr, int? delta) {
+        var details = new MatchDetailsData(new MatchInfoData(id, "map", queue, at.ToUnixTimeMilliseconds(), null, ""),
+            [new MatchPlayerData(subject, "", "", "blue", "agent", new MatchPlayerStatsData(score, 10, 5, 2, 10))],
+            [new MatchTeamData("blue", win, win ? 13 : 5), new MatchTeamData("red", !win, win ? 5 : 13)], [], [])
+            { CompetitiveUpdate = rr.HasValue ? new CompetitiveUpdate(id, delta, rr, tier) : null };
+        return MatchAnalyticsEngine.Analyze(details);
+    }
+    var matches = new[] { Make("ranked", "competitive", 2200, true, 12, 24, 21), Make("unrated", "unrated", 5000, false, null, null, null) };
+    var competitive = MatchAnalyticsEngine.CompetitiveOnly(matches).ToArray(); Equal(1, competitive.Length);
+    var summary = MatchAnalyticsEngine.AnalyzeHistory(competitive, subject); Equal(1, summary.MatchCount); Equal(1, summary.Wins); Equal<double?>(220, summary.AverageCombatScore);
+    var today = MatchAnalyticsEngine.Today(competitive, subject, at, TimeZoneInfo.Utc); Equal(1, today.MatchCount);
+    var point = MatchAnalyticsEngine.Trend(competitive, subject, "RR推移").Single(); Equal(24d, point.Value); Equal<int?>(12, point.TierAfterUpdate); Equal<int?>(21, point.RankedRatingEarned);
+    return Task.CompletedTask;
+}));
 tests.Add(("match parser keeps explicit custom indicator even when queueID is empty", () => {
     var custom = ParseMatch("""{"matchId":"m1","mapId":"/Game/Maps/Ascent/Ascent","queueID":"","isCustomGame":true}""");
     Equal<bool?>(true, custom.Info.IsCustomGame); Equal("", custom.Info.QueueId);
@@ -1181,19 +1454,19 @@ sealed class Fake : IGameApi
     public string? MatchId = "match-1", CoreMatchId, CoreMapId;
     public string? PartyState = "DEFAULT", LocalFlow;
     public string State = "character_select_active", SelfState = "", Selected = "", MapId = "";
-    public bool IncludeSelf = true, LoseLockResponse;
+    public bool IncludeSelf = true, LoseLockResponse, DirectLockConfirm;
     public List<Player> Others = [];
     public string? RejectAgent;
-    public int Selects, Locks, SelectError;
+    public int Selects, Locks, SelectError, MatchIdCalls, MatchCalls;
     public Action? AfterSelect;
-    public Task<string?> GetMatchId(CancellationToken ct) { ct.ThrowIfCancellationRequested(); return Task.FromResult(MatchId); }
+    public Task<string?> GetMatchId(CancellationToken ct) { ct.ThrowIfCancellationRequested(); MatchIdCalls++; return Task.FromResult(MatchId); }
     public Task<string?> GetCoreMatchId(CancellationToken ct) { ct.ThrowIfCancellationRequested(); return Task.FromResult(CoreMatchId); }
     public Task<string?> GetCoreMapId(string id, CancellationToken ct) { ct.ThrowIfCancellationRequested(); return Task.FromResult(CoreMapId); }
     public Task<string?> GetPartyState(CancellationToken ct) { ct.ThrowIfCancellationRequested(); return Task.FromResult(PartyState); }
     public Task<string?> GetLocalGameFlowState(CancellationToken ct) { ct.ThrowIfCancellationRequested(); return Task.FromResult(LocalFlow); }
     public Task<MatchSnapshot> GetMatch(string id, CancellationToken ct)
     {
-        ct.ThrowIfCancellationRequested(); var players = new List<Player>(Others);
+        ct.ThrowIfCancellationRequested(); MatchCalls++; var players = new List<Player>(Others);
         if (IncludeSelf) players.Add(new(Subject, Selected, SelfState));
         return Task.FromResult(new MatchSnapshot(MatchId!, State, players, MapId));
     }
@@ -1209,6 +1482,15 @@ sealed class Fake : IGameApi
         ct.ThrowIfCancellationRequested(); Locks++; Selected = agent; SelfState = "locked";
         if (LoseLockResponse) throw new HttpRequestException();
         return Task.CompletedTask;
+    }
+    public Task<MatchSnapshot?> LockAndConfirm(string match, string agent, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested(); Locks++; Selected = agent; SelfState = "locked";
+        if (LoseLockResponse) throw new HttpRequestException();
+        if (!DirectLockConfirm) return Task.FromResult<MatchSnapshot?>(null);
+        var players = new List<Player>(Others);
+        if (IncludeSelf) players.Add(new(Subject, Selected, SelfState));
+        return Task.FromResult<MatchSnapshot?>(new MatchSnapshot(MatchId!, State, players, MapId));
     }
 }
 

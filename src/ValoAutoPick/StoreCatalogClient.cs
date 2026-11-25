@@ -13,6 +13,7 @@ internal sealed class CatalogClient : IDisposable
     private static readonly Uri BuddiesUri = new("https://valorant-api.com/v1/buddies?language=ja-JP");
     private static readonly Uri PlayerCardsUri = new("https://valorant-api.com/v1/playercards?language=ja-JP");
     private static readonly Uri SpraysUri = new("https://valorant-api.com/v1/sprays?language=ja-JP");
+    private static readonly Uri PlayerTitlesUri = new("https://valorant-api.com/v1/playertitles?language=ja-JP");
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromHours(12);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -37,7 +38,7 @@ internal sealed class CatalogClient : IDisposable
     public async Task<CatalogSnapshot> LoadAsync(bool refresh, CancellationToken cancellationToken)
     {
         var cached = await TryReadCacheAsync(cancellationToken);
-        if (!refresh && cached is { } fresh && fresh.HasWeaponImages && DateTimeOffset.UtcNow - fresh.UpdatedAt is var age && age >= TimeSpan.Zero && age < CacheLifetime)
+        if (!refresh && cached is { } fresh && fresh.HasWeaponImages && fresh.HasPlayerTitles && DateTimeOffset.UtcNow - fresh.UpdatedAt is var age && age >= TimeSpan.Zero && age < CacheLifetime)
             return fresh with { FromCache = true };
 
         try
@@ -48,10 +49,11 @@ internal sealed class CatalogClient : IDisposable
             var buddiesTask = FetchOptionalListAsync<BuddyData>(BuddiesUri, cancellationToken);
             var cardsTask = FetchOptionalListAsync<AccessoryData>(PlayerCardsUri, cancellationToken);
             var spraysTask = FetchOptionalListAsync<AccessoryData>(SpraysUri, cancellationToken);
-            await Task.WhenAll(weaponsTask, tiersTask, bundlesTask, buddiesTask, cardsTask, spraysTask);
+            var titlesTask = FetchOptionalListAsync<PlayerTitleData>(PlayerTitlesUri, cancellationToken);
+            await Task.WhenAll(weaponsTask, tiersTask, bundlesTask, buddiesTask, cardsTask, spraysTask, titlesTask);
             var weapons = await weaponsTask;
             if (weapons.Count == 0) throw new InvalidDataException("武器カタログが空です。");
-            var optionalFailed = tiersTask.Result is null || bundlesTask.Result is null || buddiesTask.Result is null || cardsTask.Result is null || spraysTask.Result is null;
+            var optionalFailed = tiersTask.Result is null || bundlesTask.Result is null || buddiesTask.Result is null || cardsTask.Result is null || spraysTask.Result is null || titlesTask.Result is null;
             if (optionalFailed && cached is { } fallback) return fallback with { FromCache = true };
 
             var payload = new CatalogCachePayload(
@@ -61,7 +63,8 @@ internal sealed class CatalogClient : IDisposable
                 await bundlesTask ?? [],
                 await buddiesTask ?? [],
                 await cardsTask ?? [],
-                await spraysTask ?? []);
+                await spraysTask ?? [],
+                await titlesTask ?? []);
             var snapshot = await Task.Run(() => CreateSnapshot(payload, fromCache: false), cancellationToken);
             if (!optionalFailed) await TryWriteCacheAsync(payload, cancellationToken);
             return snapshot;
@@ -140,7 +143,7 @@ internal sealed class CatalogClient : IDisposable
         }
     }
 
-    private static CatalogSnapshot CreateSnapshot(CatalogCachePayload source, bool fromCache)
+    internal static CatalogSnapshot CreateSnapshot(CatalogCachePayload source, bool fromCache)
     {
         var tiersSource = source.Tiers ?? [];
         var weaponsSource = source.Weapons ?? [];
@@ -148,6 +151,7 @@ internal sealed class CatalogClient : IDisposable
         var buddiesSource = source.Buddies ?? [];
         var cardsSource = source.PlayerCards ?? [];
         var spraysSource = source.Sprays ?? [];
+        var titlesSource = source.PlayerTitles ?? [];
         var tiers = tiersSource.Where(t => t is not null && !string.IsNullOrWhiteSpace(t.Uuid))
             .GroupBy(t => t.Uuid, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
@@ -196,7 +200,7 @@ internal sealed class CatalogClient : IDisposable
             .ToDictionary(
                 group => group.Key,
                 group => new BundleCard(group.First().DisplayName,
-                    SafeAssets(group.First().VerticalPromoImage, group.First().DisplayIcon)),
+                    SafeAssets(group.First().DisplayIcon, group.First().DisplayIcon2, group.First().VerticalPromoImage)),
                 StringComparer.OrdinalIgnoreCase);
 
         var accessories = new Dictionary<string, StoreItemCard>(StringComparer.OrdinalIgnoreCase);
@@ -211,6 +215,13 @@ internal sealed class CatalogClient : IDisposable
         }
         foreach (var card in cardsSource.Where(card => card is not null)) AddAccessory(accessories, card.Uuid, card.DisplayName, "プレイヤーカード", card.DisplayIcon);
         foreach (var spray in spraysSource.Where(spray => spray is not null)) AddAccessory(accessories, spray.Uuid, spray.DisplayName, "スプレー", spray.DisplayIcon);
+        foreach (var title in titlesSource.Where(title => title is not null))
+        {
+            var displayName = !string.IsNullOrWhiteSpace(title.DisplayName) ? title.DisplayName.Trim() : title.TitleText?.Trim() ?? "";
+            var titleText = !string.IsNullOrWhiteSpace(title.TitleText) ? title.TitleText.Trim() : displayName;
+            if (!string.IsNullOrWhiteSpace(title.Uuid) && !string.IsNullOrWhiteSpace(displayName))
+                accessories.TryAdd(title.Uuid, new StoreItemCard(displayName, "プレイヤータイトル", [], titleText));
+        }
 
         var skins = weapons.SelectMany(w => w.Skins).ToList();
         var videoCount = skins.SelectMany(s => s.Levels.Select(l => l.Video).Concat(s.Chromas.Select(c => c.Video)))
@@ -230,7 +241,8 @@ internal sealed class CatalogClient : IDisposable
             // Older cache files did not retain weapon display icons. Fetch once so missing
             // skin art has a real weapon image to fall back to, while keeping the old cache
             // available if the refresh cannot reach the catalog API.
-            HasWeaponImages = weaponsSource.Any(weapon => weapon is not null && !string.IsNullOrWhiteSpace(SafeAsset(weapon.DisplayIcon)))
+            HasWeaponImages = weaponsSource.Any(weapon => weapon is not null && !string.IsNullOrWhiteSpace(SafeAsset(weapon.DisplayIcon))),
+            HasPlayerTitles = titlesSource.Any(title => title is not null && !string.IsNullOrWhiteSpace(title.Uuid))
         };
     }
 

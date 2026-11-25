@@ -106,6 +106,9 @@ internal sealed class BundleData
     [JsonPropertyName("displayIcon")]
     public string? DisplayIcon { get; set; }
 
+    [JsonPropertyName("displayIcon2")]
+    public string? DisplayIcon2 { get; set; }
+
     [JsonPropertyName("verticalPromoImage")]
     public string? VerticalPromoImage { get; set; }
 }
@@ -120,6 +123,18 @@ internal class AccessoryData
 
     [JsonPropertyName("displayIcon")]
     public string? DisplayIcon { get; set; }
+}
+
+internal sealed class PlayerTitleData
+{
+    [JsonPropertyName("uuid")]
+    public string Uuid { get; set; } = "";
+
+    [JsonPropertyName("displayName")]
+    public string DisplayName { get; set; } = "";
+
+    [JsonPropertyName("titleText")]
+    public string? TitleText { get; set; }
 }
 
 internal sealed class BuddyData : AccessoryData
@@ -147,7 +162,8 @@ internal sealed record CatalogCachePayload(
     List<BundleData> Bundles,
     List<BuddyData> Buddies,
     List<AccessoryData> PlayerCards,
-    List<AccessoryData> Sprays);
+    List<AccessoryData> Sprays,
+    List<PlayerTitleData>? PlayerTitles = null);
 
 internal sealed record CatalogSnapshot(
     DateTimeOffset UpdatedAt,
@@ -160,11 +176,12 @@ internal sealed record CatalogSnapshot(
     bool FromCache)
 {
     public bool HasWeaponImages { get; init; }
+    public bool HasPlayerTitles { get; init; }
 }
 
 internal sealed record BundleCard(string Name, IReadOnlyList<string> Images);
 
-internal sealed record StoreItemCard(string Name, string Type, IReadOnlyList<string> Images);
+internal sealed record StoreItemCard(string Name, string Type, IReadOnlyList<string> Images, string? TitleText = null);
 
 internal sealed record WeaponCard(
     string Name,

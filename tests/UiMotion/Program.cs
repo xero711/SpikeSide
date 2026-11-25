@@ -94,9 +94,11 @@ internal static class Program
                 await CheckSettingsLifecycle();
                 CheckRegionSelectorBounds();
                 CheckFavoriteFilterSpacing();
+                CheckLiveTracker();
                 await CheckClosingWaitsForPendingWork();
                 await CheckAtomicUiUpdates();
                 CheckStoreNavigationSpacing();
+                CheckRrChartScale();
                 CheckMainStoreSpacing();
                 using (var artworkResource = assembly.GetManifestResourceStream("ValoAutoPick.Assets.SpikeSide.png"))
                 {
@@ -202,6 +204,7 @@ internal static class Program
                     ((NotifyIcon)typeof(MainWindow).GetField("tray", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(main)!).Dispose();
                 }
                 CheckCareerMetricLayout();
+                CheckBundleAndPlayerTitleCards();
                 await CheckAutoStopOnValorantExit();
                 using (var unavailable = new AgentTile(new Agent("add6443a-41bd-e414-f6ad-e58d267f4e95", "ジェット", "デュエリスト"), available: false))
                 {
@@ -419,6 +422,56 @@ internal static class Program
         }
     }
 
+    private static void CheckLiveTracker()
+    {
+        using var window = new TestWindow { ClientSize = new Size(950, 650), ShowInTaskbar = false, Opacity = 0 };
+        var type = typeof(MainWindow).Assembly.GetType("ValoAutoPick.LiveMatchControl")!;
+        using var live = (Control)Activator.CreateInstance(type, nonPublic: true)!;
+        live.Dock = DockStyle.Fill; window.Controls.Add(live); window.Show(); Application.DoEvents();
+        type.GetMethod("ShowPreview", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(live, null);
+        var roster = (ListView)type.GetField("roster", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
+        var details = (Label)type.GetField("details", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
+        Assert(roster.Items.Count == 2 && details.Text.Contains("Player One"), "live tracker renders a sample match and selected player");
+        roster.Items[1].Selected = true; Application.DoEvents();
+        Assert(details.Text.Contains("Player Two") && details.Text.Contains("Sage"), "selecting a different player updates live details");
+        Assert(roster.Columns.Cast<ColumnHeader>().Sum(column => column.Width) <= roster.ClientSize.Width, "live tracker columns fit at a compact window size");
+        var summary = (Label)type.GetField("summary", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(live)!;
+        var modeName = type.GetMethod("ModeName", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert((string)modeName.Invoke(null, ["/Game/GameModes/Bomb/BombGameMode.BombGameMode_C"])! == "",
+            "shared bomb game mode asset path does not guess competitive vs unrated");
+        Assert((string)modeName.Invoke(null, ["/Game/GameModes/QuickBomb/QuickBombGameMode.QuickBombGameMode_C"])! == "スパイクラッシュ",
+            "specific game mode asset paths map to Japanese names");
+        type.GetMethod("ResetSession", BindingFlags.Instance | BindingFlags.Public)!.Invoke(live, null);
+        Assert(roster.Items.Count == 0 && !summary.Text.Contains("アセント") && !details.Text.Contains("Player Two"),
+            "resetting live session clears stale match summary, roster, and selected player details");
+
+        // A failed refresh holds a young roster (labelled, score hidden) but drops an old one together with the selection.
+        const BindingFlags nonPublic = BindingFlags.Instance | BindingFlags.NonPublic;
+        var lastSuccess = type.GetField("lastSuccess", nonPublic)!;
+        var connection = (Label)type.GetField("connection", nonPublic)!.GetValue(live)!;
+        var showPreview = type.GetMethod("ShowPreview", nonPublic)!;
+        var keepOrDrop = type.GetMethod("KeepOrDropSnapshot", nonPublic)!;
+        var expire = type.GetMethod("ExpireStaleSnapshot", nonPublic)!;
+        var render = type.GetMethod("RenderState", nonPublic)!;
+        showPreview.Invoke(live, null);
+        roster.Items[1].Selected = true; Application.DoEvents();
+        lastSuccess.SetValue(live, (DateTimeOffset?)DateTimeOffset.UtcNow);
+        keepOrDrop.Invoke(live, ["試合情報を取得できませんでした。再試行します"]); render.Invoke(live, null);
+        Assert(roster.Items.Count == 2 && details.Text.Contains("Player Two"), "a failed refresh keeps a young roster and the selected player");
+        Assert(summary.Text.Contains("再接続待ち") && !summary.Text.Contains("4 : 3"), "a held roster says it is waiting to reconnect and hides the score");
+        Assert(connection.Text.Contains("時点の情報を表示中"), "a held roster states when it was last confirmed");
+        Assert(!(bool)expire.Invoke(live, null)!, "a young roster is not expired by the render tick");
+        lastSuccess.SetValue(live, (DateTimeOffset?)DateTimeOffset.UtcNow.AddMinutes(-10));
+        Assert((bool)expire.Invoke(live, null)!, "a roster nobody refreshed for minutes expires, for example after a long 429 wait or a hidden tab");
+        render.Invoke(live, null);
+        Assert(roster.Items.Count == 0 && !details.Text.Contains("Player Two") && !summary.Text.Contains("アセント"), "an expired roster clears the list, the selection and the match summary");
+        showPreview.Invoke(live, null);
+        lastSuccess.SetValue(live, (DateTimeOffset?)DateTimeOffset.UtcNow.AddMinutes(-10));
+        keepOrDrop.Invoke(live, ["試合情報を取得できませんでした。再試行します"]); render.Invoke(live, null);
+        Assert(roster.Items.Count == 0 && !details.Text.Contains("Player One"), "a failed refresh drops a roster that is already too old");
+        window.Close();
+    }
+
     private static void CheckFavoriteFilterSpacing()
     {
         using var api = new RiotApi();
@@ -514,8 +567,12 @@ internal static class Program
                 var statusRow = status.Parent!;
                 var header = statusRow.Parent!;
                 var counts = header.Controls.Cast<Control>().Single(control => control.AccessibleName == "カタログの収録件数");
+                var wallet = header.Controls.Cast<Control>().Single(control => control.AccessibleName == "所持クレジット");
                 Assert(statusRow.Bottom <= header.ClientSize.Height && statusRow.Right <= counts.Left,
                     $"status fits beside catalog counts at {width}px");
+                Assert(wallet.Right <= header.ClientSize.Width && wallet.Bottom <= header.ClientSize.Height &&
+                       !wallet.Bounds.IntersectsWith(counts.Bounds) && !wallet.Bounds.IntersectsWith(statusRow.Bounds),
+                    $"wallet card fits without overlapping header elements at {width}px");
                 typeof(StorePreviewControl).GetMethod("EndProgress", flags)!.Invoke(store, [message]);
             }
             var tabsBottom = tabs.PointToScreen(new Point(0, tabs.Height)).Y;
@@ -533,6 +590,91 @@ internal static class Program
             else Assert(searchTop >= actionsBottom, "search does not overlap the navigation actions");
         }
         Assert(sawStacked, "navigation spacing is checked with stacked actions");
+    }
+
+    private static void CheckBundleAndPlayerTitleCards()
+    {
+        var flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var asm = typeof(StorePreviewControl).Assembly;
+        object New(string typeName, params object?[] args) => Activator.CreateInstance(asm.GetType("ValoAutoPick." + typeName)!, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, args, null)!;
+        object TypedList(string itemTypeName, params object[] items)
+        {
+            var list = Activator.CreateInstance(typeof(List<>).MakeGenericType(asm.GetType("ValoAutoPick." + itemTypeName)!))!;
+            var add = list.GetType().GetMethod("Add")!;
+            foreach (var item in items) add.Invoke(list, [item]);
+            return list;
+        }
+        var skin = New("SkinData");
+        skin.GetType().GetProperty("Uuid")!.SetValue(skin, "skin-1");
+        skin.GetType().GetProperty("DisplayName")!.SetValue(skin, "スノーフォール");
+        var weapon = New("WeaponData");
+        weapon.GetType().GetProperty("DisplayName")!.SetValue(weapon, "ヴァンダル");
+        weapon.GetType().GetProperty("Category")!.SetValue(weapon, "EEquippableCategory::Rifle");
+        weapon.GetType().GetProperty("DisplayIcon")!.SetValue(weapon, "https://media.valorant-api.com/weapons/vandal/displayicon.png");
+        weapon.GetType().GetProperty("Skins")!.SetValue(weapon, TypedList("SkinData", skin));
+        var bundleData = New("BundleData");
+        bundleData.GetType().GetProperty("Uuid")!.SetValue(bundleData, "bundle-1");
+        bundleData.GetType().GetProperty("DisplayName")!.SetValue(bundleData, "スノーフォール");
+        bundleData.GetType().GetProperty("DisplayIcon")!.SetValue(bundleData, "https://media.valorant-api.com/bundles/bundle-1/displayicon.png");
+        bundleData.GetType().GetProperty("DisplayIcon2")!.SetValue(bundleData, "https://media.valorant-api.com/bundles/bundle-1/displayicon2.png");
+        bundleData.GetType().GetProperty("VerticalPromoImage")!.SetValue(bundleData, "https://media.valorant-api.com/bundles/bundle-1/verticalpromoimage.png");
+        var titleData = New("PlayerTitleData");
+        titleData.GetType().GetProperty("Uuid")!.SetValue(titleData, "title-1");
+        titleData.GetType().GetProperty("DisplayName")!.SetValue(titleData, "スノーフォール タイトル");
+        titleData.GetType().GetProperty("TitleText")!.SetValue(titleData, "スノーフォール");
+
+        var payload = New("CatalogCachePayload",
+            DateTimeOffset.UtcNow,
+            TypedList("WeaponData", weapon),
+            TypedList("ContentTierData"),
+            TypedList("BundleData", bundleData),
+            TypedList("BuddyData"),
+            TypedList("AccessoryData"),
+            TypedList("AccessoryData"),
+            TypedList("PlayerTitleData", titleData));
+        var snapshot = asm.GetType("ValoAutoPick.CatalogClient")!
+            .GetMethod("CreateSnapshot", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [payload, false])!;
+        Assert((bool)snapshot.GetType().GetProperty("HasPlayerTitles")!.GetValue(snapshot)!,
+            "catalog snapshot marks player titles available");
+        var bundlesDict = snapshot.GetType().GetProperty("Bundles")!.GetValue(snapshot)!;
+        var bundleInfo = bundlesDict.GetType().GetProperty("Item")!.GetValue(bundlesDict, ["bundle-1"])!;
+        var bundleImages = (IReadOnlyList<string>)bundleInfo.GetType().GetProperty("Images")!.GetValue(bundleInfo)!;
+        Assert(bundleImages[0].EndsWith("/displayicon.png", StringComparison.Ordinal),
+            "bundle card prefers horizontal displayIcon over vertical promo image");
+        var accessoriesDict = snapshot.GetType().GetProperty("Accessories")!.GetValue(snapshot)!;
+        var titleCard = accessoriesDict.GetType().GetProperty("Item")!.GetValue(accessoriesDict, ["title-1"])!;
+        Assert((string)titleCard.GetType().GetProperty("Type")!.GetValue(titleCard)! == "プレイヤータイトル" &&
+               (string?)titleCard.GetType().GetProperty("TitleText")!.GetValue(titleCard) == "スノーフォール",
+            "catalog snapshot indexes player titles into accessories");
+
+        using var api = new RiotApi();
+        using var window = new TestWindow { ClientSize = new Size(1400, 800), ShowInTaskbar = false };
+        using var store = new StorePreviewControl(api) { Dock = DockStyle.Fill };
+        typeof(StorePreviewControl).GetField("catalogSnapshot", flags)!.SetValue(store, snapshot);
+        window.Controls.Add(store);
+        window.Show();
+
+        var bundle = new StorefrontBundle("id-1", "bundle-1", [],
+            new Dictionary<string, long> { ["85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741"] = 5100 },
+            new Dictionary<string, long> { ["85ad13f7-3d1b-5128-9eb2-7cd8ee0b5741"] = 5100 }, 0, 3600);
+        using var bundleCard = (Control)typeof(StorePreviewControl).GetMethod("CreateBundleCard", flags)!.Invoke(store, [bundle])!;
+        var bundleImage = bundleCard.Controls.Cast<Control>().Single(c => c.GetType().Name == "SharpImageBox");
+        var fit = bundleImage.GetType().GetProperty("Fit")!.GetValue(bundleImage)!.ToString();
+        Assert(fit == "Contain", $"bundle image preserves full aspect ratio with Contain (got {fit})");
+
+        var titleOffer = new StorefrontOffer("offer-title", "title-1", "de7caa6b-adf7-4588-bbd1-143831e786c6",
+            new Dictionary<string, long> { ["85ca954a-41f2-ce94-9b45-8ca3dd39a00d"] = 5000 });
+        using var accessoryCard = (Control)typeof(StorePreviewControl).GetMethod("CreateAccessoryCard", flags)!.Invoke(store, [titleOffer])!;
+        accessoryCard.Size = new Size(280, 260);
+        accessoryCard.PerformLayout();
+        Assert(!accessoryCard.Controls.Cast<Control>().Any(c => c.GetType().Name == "SharpImageBox"),
+            "player title accessory card does not render an empty image placeholder");
+        var plate = accessoryCard.Controls.Cast<Control>().Single(c => c.AccessibleName == "プレイヤータイトルのプレビュー");
+        Assert(plate.Controls.OfType<Label>().Any(l => l.Text == "スノーフォール"),
+            "player title preview displays the title text");
+        Assert(accessoryCard.Controls.OfType<Label>().Any(l => l.Text.Contains("プレイヤータイトル") && l.Text.Contains("5,000 KC")),
+            "player title accessory caption displays type and cost");
     }
 
     private static void CheckCareerMetricLayout()
@@ -727,6 +869,25 @@ internal static class Program
             if (window == back.Handle) return true;
         return false;
     }
+    private static void CheckRrChartScale()
+    {
+        var type = typeof(MatchHistoryControl).Assembly.GetType("ValoAutoPick.MatchTrendChart")!;
+        using var chart = (Control)Activator.CreateInstance(type, true)!;
+        chart.Size = new Size(640, 260);
+        using var font = new Font("Yu Gothic UI", 16);
+        chart.Font = font;
+        type.GetProperty("Metric", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(chart, "RR推移");
+        var date = DateTimeOffset.UtcNow;
+        TrendPoint[] points = [new("a", "map", date, 0, MatchOutcome.Loss), new("b", "map", date.AddDays(1), 100, MatchOutcome.Win)];
+        type.GetMethod("SetPoints")!.Invoke(chart, [points]);
+        using var bitmap = new Bitmap(chart.Width, chart.Height);
+        chart.DrawToBitmap(bitmap, chart.ClientRectangle);
+        var positions = (PointF[])type.GetField("positions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(chart)!;
+        var labelWidth = TextRenderer.MeasureText("100", font, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine).Width;
+        Assert(positions.Length == 2 && positions[0].X > labelWidth, "RR axis reserves room for three-digit labels");
+        Assert(positions[0].Y > positions[1].Y, "RR axis places 100 above zero");
+    }
+
     private static int Distance(Color a, Color b) => Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B);
     private static void Assert(bool condition, string text)
     {
