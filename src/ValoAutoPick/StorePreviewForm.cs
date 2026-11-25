@@ -212,6 +212,14 @@ public sealed class StorePreviewControl : UserControl
             playbackButton.Visible = true;
             muteVideoButton.Visible = true;
             SetStatus("", false);
+            // Start only after WPF has laid out and rendered the full-size surface, from the first frame.
+            mediaPlayer.Position = TimeSpan.Zero;
+            var source = mediaPlayer.Source;
+            mediaPlayer.Dispatcher.BeginInvoke(() =>
+            {
+                if (disposingStore || IsDisposed || Disposing || !videoHost.Visible || videoPaused || mediaPlayer.Source != source) return;
+                mediaPlayer.Play();
+            }, System.Windows.Threading.DispatcherPriority.Loaded);
         };
         mediaPlayer.MediaOpened += mediaOpenedHandler;
         mediaEndedHandler = (_, _) =>
@@ -327,7 +335,15 @@ public sealed class StorePreviewControl : UserControl
                     PreviewVideoResult = "TimedOut";
                 return false;
             }
-            return await completion.Task.WaitAsync(timeoutStop.Token);
+            var opened = await completion.Task.WaitAsync(timeoutStop.Token);
+            if (opened)
+            {
+                // Record where playback started and that it advances, so the smoke check catches a frozen start.
+                var start = mediaPlayer.Position;
+                await Task.Delay(1500, timeoutStop.Token);
+                PreviewVideoResult += $":start={start.TotalMilliseconds:0}ms:after1.5s={mediaPlayer.Position.TotalMilliseconds:0}ms";
+            }
+            return opened;
         }
         catch (OperationCanceledException)
         {
@@ -2062,7 +2078,11 @@ public sealed class StorePreviewControl : UserControl
             ParkVideoHost();
             videoLoadingOverlay.BringToFront();
             mediaPlayer.Source = uri;
-            mediaPlayer.Play();
+            // Open paused. Playing while the host is parked at 1x1 decodes the first frames into that tiny
+            // surface; when the host grows on MediaOpened the renderer keeps showing a stretched or broken
+            // frame until the next keyframe. A fast download makes that gap short enough to see every time.
+            // MediaOpened starts playback from frame 0 once the host has its real size.
+            mediaPlayer.Pause();
             return true;
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
