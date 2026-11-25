@@ -98,6 +98,29 @@ public sealed class StorePreviewControl : UserControl
         VerticalAlignment = System.Windows.VerticalAlignment.Stretch
     };
     private readonly MediaElement mediaPlayer = new() { LoadedBehavior = MediaState.Manual, UnloadedBehavior = MediaState.Stop, Stretch = Stretch.Uniform, IsMuted = true, Volume = .2 };
+    // Loading cover drawn inside the WPF surface, above the MediaElement. A WinForms overlay cannot sit on top of the
+    // ElementHost (airspace), and hiding or shrinking the host while the media opens is what froze and blurred the start.
+    private readonly System.Windows.Controls.Border videoCover = new()
+    {
+        Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(10, 13, 19)),
+        Visibility = System.Windows.Visibility.Collapsed,
+        Child = new System.Windows.Controls.TextBlock
+        {
+            Text = "動画を読み込んでいます…",
+            Foreground = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(150, 164, 183)),
+            HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+            VerticalAlignment = System.Windows.VerticalAlignment.Center,
+            FontSize = 13
+        }
+    };
+    // Watches the first moments of playback: the cover is removed only once the position has really advanced.
+    private readonly System.Windows.Forms.Timer videoStartTimer = new() { Interval = 100 };
+    private Uri? videoSource;
+    private bool videoMediaOpened;
+    private int videoStartAttempts;
+    private DateTime videoPlayRequestedAt;
+    private static readonly TimeSpan VideoStartStallLimit = TimeSpan.FromSeconds(3);
+    private const double VideoStartedPositionMs = 200;
     private readonly ThemedTextEntry searchBox = new() { PlaceholderText = "スキン名・武器名で検索" };
     private readonly ThemedSelect categorySelect = new(["すべてのカテゴリー"]);
     private readonly ThemedSelect weaponSelect = new(["すべての武器"]);
@@ -160,14 +183,18 @@ public sealed class StorePreviewControl : UserControl
         BackColor = Theme.Background;
         mediaPlayer.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
         mediaPlayer.VerticalAlignment = System.Windows.VerticalAlignment.Stretch;
+        // 1080p skin videos are shown at a few hundred pixels; the default linear filter makes them look blocky.
+        System.Windows.Media.RenderOptions.SetBitmapScalingMode(mediaPlayer, System.Windows.Media.BitmapScalingMode.HighQuality);
         videoSurface.Children.Add(mediaPlayer);
+        videoSurface.Children.Add(videoCover);
         videoHost.Child = videoSurface;
+        videoStartTimer.Tick += (_, _) => CheckVideoStart();
         videoHost.SizeChanged += (_, _) => ResizeVideoSurface();
         videoHost.DpiChangedAfterParent += (_, _) => ResizeVideoSurface();
         videoOpenTimer.Tick += (_, _) =>
         {
             videoOpenTimer.Stop();
-            if (!videoOpening || !videoLoadingOverlay.Visible || IsDisposed || Disposing) return;
+            if (!videoOpening || IsDisposed || Disposing) return;
             PreviewVideoResult = "MediaOpenTimedOut";
             ShowPreviewImage();
             SetStatus("動画の読み込みに時間がかかっています。もう一度お試しください。", true);
@@ -190,36 +217,16 @@ public sealed class StorePreviewControl : UserControl
         mediaOpenedHandler = (_, _) =>
         {
             if (disposingStore || IsDisposed || Disposing) return;
-            if (!videoOpening) return;
-            videoOpenTimer.Stop();
-            videoOpening = false;
-            videoLoadingOverlay.Loading = false;
-            videoLoadingOverlay.Visible = false;
-            previewImage.Visible = false;
-            // Leave the 1x1 parking spot from PlayPreviewVideoAsync and take the full preview area.
-            RestoreVideoHost(visible: true);
-            videoHost.BringToFront();
+            if (!videoOpening || mediaPlayer.Source != videoSource) return;
+            // The host already has its full size (see PlayPreviewVideoAsync); start from the first frame and
+            // keep the cover up until CheckVideoStart sees the position move.
+            videoMediaOpened = true;
             ResizeVideoSurface();
             videoSurface.UpdateLayout();
             PreviewVideoResult = $"MediaOpened:{mediaPlayer.NaturalVideoWidth}x{mediaPlayer.NaturalVideoHeight}:{mediaPlayer.ActualWidth:0}x{mediaPlayer.ActualHeight:0}:{videoHost.ClientSize.Width}x{videoHost.ClientSize.Height}";
-            playVideoButton.Visible = false;
-            stopVideoButton.Text = "画像へ";
-            stopVideoButton.Invalidate();
-            stopVideoButton.Visible = true;
-            playbackOpened?.TrySetResult(true);
-            videoPaused = false;
-            UpdateVideoControls();
-            playbackButton.Visible = true;
-            muteVideoButton.Visible = true;
-            SetStatus("", false);
-            // Start only after WPF has laid out and rendered the full-size surface, from the first frame.
             mediaPlayer.Position = TimeSpan.Zero;
-            var source = mediaPlayer.Source;
-            mediaPlayer.Dispatcher.BeginInvoke(() =>
-            {
-                if (disposingStore || IsDisposed || Disposing || !videoHost.Visible || videoPaused || mediaPlayer.Source != source) return;
-                mediaPlayer.Play();
-            }, System.Windows.Threading.DispatcherPriority.Loaded);
+            mediaPlayer.Play();
+            videoPlayRequestedAt = DateTime.UtcNow;
         };
         mediaPlayer.MediaOpened += mediaOpenedHandler;
         mediaEndedHandler = (_, _) =>
@@ -255,6 +262,7 @@ public sealed class StorePreviewControl : UserControl
             StopMedia();
             videoHost.Child = null;
             videoOpenTimer.Dispose();
+            videoStartTimer.Stop(); videoStartTimer.Dispose();
             countdownTimer.Stop(); countdownTimer.Dispose();
             mediaToolTips.Dispose();
             catalog.Dispose(); loginWindow?.Dispose();
@@ -2068,21 +2076,23 @@ public sealed class StorePreviewControl : UserControl
             }
 
             var uri = new Uri(localFile, UriKind.Absolute);
-            videoLoadingOverlay.LoadingMessage = "動画を読み込んでいます…";
             mediaPlayer.Stop();
             videoOpening = true;
             videoOpenTimer.Stop();
             videoOpenTimer.Start();
-            // The ElementHost HWND must exist for WPF to open the media, but a full-size host would
-            // cover the loading overlay (WinForms/WPF airspace). Park it at 1x1 off-screen until MediaOpened.
-            ParkVideoHost();
-            videoLoadingOverlay.BringToFront();
-            mediaPlayer.Source = uri;
-            // Open paused. Playing while the host is parked at 1x1 decodes the first frames into that tiny
-            // surface; when the host grows on MediaOpened the renderer keeps showing a stretched or broken
-            // frame until the next keyframe. A fast download makes that gap short enough to see every time.
-            // MediaOpened starts playback from frame 0 once the host has its real size.
-            mediaPlayer.Pause();
+            // Open at the host's real size. Opening in a 1x1 parked host decoded the first frames into a tiny
+            // surface: the start froze, sometimes stayed black, or stayed blurry after the host grew. The WPF
+            // cover hides the surface until playback has actually started.
+            videoCover.Visibility = System.Windows.Visibility.Visible;
+            videoLoadingOverlay.Loading = false;
+            videoLoadingOverlay.Visible = false;
+            RestoreVideoHost(visible: true);
+            videoHost.BringToFront();
+            ResizeVideoSurface();
+            videoSurface.UpdateLayout();
+            OpenVideoSource(uri);
+            videoStartAttempts = 0;
+            videoStartTimer.Start();
             return true;
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
@@ -2155,7 +2165,11 @@ public sealed class StorePreviewControl : UserControl
     private void StopMedia()
     {
         videoOpenTimer.Stop();
+        videoStartTimer.Stop();
         videoOpening = false;
+        videoSource = null;
+        videoMediaOpened = false;
+        videoCover.Visibility = System.Windows.Visibility.Collapsed;
         videoLoadingOverlay.Loading = false;
         videoLoadingOverlay.Visible = false;
         videoLoad?.Cancel();
@@ -2165,12 +2179,65 @@ public sealed class StorePreviewControl : UserControl
         RestoreVideoHost();
     }
 
-    private void ParkVideoHost()
+    // Opens the file paused; MediaOpened starts it from frame 0.
+    private void OpenVideoSource(Uri uri)
     {
-        videoHost.Dock = DockStyle.None;
-        videoHost.Size = new Size(1, 1);
-        videoHost.Location = new Point(-10, -10);
-        videoHost.Visible = true;
+        videoSource = uri;
+        videoMediaOpened = false;
+        videoPlayRequestedAt = DateTime.UtcNow;
+        mediaPlayer.Source = uri;
+        mediaPlayer.Pause();
+    }
+
+    // Runs every 100 ms while a video is starting. The cover is removed once the position has moved past the first
+    // frames. A start that does not move is retried from frame 0, then by reopening the file, then given up.
+    private void CheckVideoStart()
+    {
+        if (!videoOpening || disposingStore || IsDisposed || Disposing || videoSource is null) { videoStartTimer.Stop(); return; }
+        if (!videoMediaOpened) return; // Waiting for MediaOpened; videoOpenTimer covers a file that never opens.
+        if (mediaPlayer.Position.TotalMilliseconds >= VideoStartedPositionMs) { OnVideoPlaybackStarted(); return; }
+        if (DateTime.UtcNow - videoPlayRequestedAt < VideoStartStallLimit) return;
+        videoStartAttempts++;
+        if (videoStartAttempts == 1)
+        {
+            mediaPlayer.Stop();
+            mediaPlayer.Position = TimeSpan.Zero;
+            mediaPlayer.Play();
+            videoPlayRequestedAt = DateTime.UtcNow;
+        }
+        else if (videoStartAttempts == 2)
+        {
+            var source = videoSource;
+            mediaPlayer.Stop();
+            mediaPlayer.Close();
+            mediaPlayer.Source = null;
+            OpenVideoSource(source);
+        }
+        else
+        {
+            PreviewVideoResult = "PlaybackStalled";
+            ShowPreviewImage();
+            SetStatus("動画の再生を開始できませんでした。もう一度お試しください。", true);
+        }
+    }
+
+    private void OnVideoPlaybackStarted()
+    {
+        videoStartTimer.Stop();
+        videoOpenTimer.Stop();
+        videoOpening = false;
+        videoCover.Visibility = System.Windows.Visibility.Collapsed;
+        previewImage.Visible = false;
+        playVideoButton.Visible = false;
+        stopVideoButton.Text = "画像へ";
+        stopVideoButton.Invalidate();
+        stopVideoButton.Visible = true;
+        videoPaused = false;
+        UpdateVideoControls();
+        playbackButton.Visible = true;
+        muteVideoButton.Visible = true;
+        SetStatus("", false);
+        playbackOpened?.TrySetResult(true);
     }
 
     // Returns the host to its normal full-size slot, hidden unless the caller shows it.
