@@ -365,6 +365,12 @@ internal static class Program
         const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
         var play = (Control)typeof(StorePreviewControl).GetField("playVideoButton", flags)!.GetValue(store)!;
         var status = (Label)typeof(StorePreviewControl).GetField("statusLabel", flags)!.GetValue(store)!;
+        Assert(status.Text.Length == 0, "signed-out STORE has no redundant status text");
+        var signedOutLoad = (Task)typeof(StorePreviewControl).GetMethod("LoadStorefrontAsync", flags)!.Invoke(store, [false])!;
+        Assert(signedOutLoad.IsCompleted && status.Text.Length == 0, "signed-out refresh adds no status text");
+        typeof(StorePreviewControl).GetMethod("SetStatus", flags)!.Invoke(store, ["以前の接続エラー", true]);
+        store.ResetSession();
+        Assert(status.Text.Length == 0, "signing out clears stale STORE errors");
         var overlay = (Control)typeof(StorePreviewControl).GetField("videoLoadingOverlay", flags)!.GetValue(store)!;
         var cache = typeof(StorePreviewControl).Assembly.GetType("ValoAutoPick.NativeVideoCache")!;
         var downloads = (SemaphoreSlim)cache.GetField("Downloads", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
@@ -494,7 +500,24 @@ internal static class Program
         foreach (var width in new[] { 1400, 800, 500, 1400 })
         {
             window.ClientSize = new Size(width, 800);
+            store.ResetSession();
             window.PerformLayout();
+            var navigationBefore = tabs.PointToScreen(Point.Empty);
+            var contentBefore = search.PointToScreen(Point.Empty);
+            foreach (var message in new[] { "Riotアカウントへ接続しています…", "今日のショップを取得しています…", "今日のショップを取得できませんでした。VALORANTのアカウント接続を確認してください。" })
+            {
+                typeof(StorePreviewControl).GetMethod("SetStatus", flags)!.Invoke(store, [message, message.Contains("できませんでした", StringComparison.Ordinal)]);
+                window.PerformLayout();
+                Assert(tabs.PointToScreen(Point.Empty) == navigationBefore && search.PointToScreen(Point.Empty) == contentBefore,
+                    $"status does not shift navigation or catalog at {width}px");
+                Assert(status.Text == message, "status remains available when the layout is stable");
+                var statusRow = status.Parent!;
+                var header = statusRow.Parent!;
+                var counts = header.Controls.Cast<Control>().Single(control => control.AccessibleName == "カタログの収録件数");
+                Assert(statusRow.Bottom <= header.ClientSize.Height && statusRow.Right <= counts.Left,
+                    $"status fits beside catalog counts at {width}px");
+                typeof(StorePreviewControl).GetMethod("EndProgress", flags)!.Invoke(store, [message]);
+            }
             var tabsBottom = tabs.PointToScreen(new Point(0, tabs.Height)).Y;
             var actionsBottom = actions.PointToScreen(new Point(0, actions.Height)).Y;
             var searchTop = search.PointToScreen(Point.Empty).Y;

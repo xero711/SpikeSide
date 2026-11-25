@@ -48,7 +48,7 @@ public sealed class StorePreviewControl : UserControl
     private readonly Label skinCountLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
     private readonly Label chromaCountLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
     private readonly Label videoCountLabel = NativePageStyle.Label("—", NativePageStyle.Metric, Theme.Text);
-    private readonly Label statusLabel = NativePageStyle.Label("Riotアカウント未接続", NativePageStyle.Small, Theme.Muted);
+    private readonly Label statusLabel = NativePageStyle.Label("", NativePageStyle.Small, Theme.Muted);
     private readonly WaitingIndicator statusSpinner = new(ringSize: 14, textGap: 6, showDelay: 80) { Dock = DockStyle.Left, Visible = false };
     private readonly List<(StorefrontBundle Bundle, Label Detail)> bundleDetails = [];
     private readonly Label catalogTitle = NativePageStyle.Label("スキンを選ぶと、画像・動画・カラーバリエーションを表示します。", NativePageStyle.Subheading);
@@ -131,7 +131,7 @@ public sealed class StorePreviewControl : UserControl
     private bool signingIn;
     private bool changingFilters;
     private bool loopVideo = true;
-    private string settledStatus = "Riotアカウント未接続";
+    private string settledStatus = "";
     private bool settledStatusError;
     private readonly List<string> activeProgressStatuses = [];
 
@@ -351,52 +351,41 @@ public sealed class StorePreviewControl : UserControl
         storefrontFetchedAt = default;
         UpdateAccountState();
         RenderStorefront();
+        activeProgressStatuses.RemoveAll(message => message.StartsWith("今日のショップ", StringComparison.Ordinal));
+        settledStatus = "";
+        settledStatusError = false;
         SetStatus("", false);
     }
 
     private void BuildInterface()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, BackColor = Theme.Background, Padding = Padding.Empty, Margin = Padding.Empty };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, BackColor = Theme.Background, Padding = Padding.Empty, Margin = Padding.Empty };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var headerRow = new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 90));
         root.RowStyles.Add(headerRow);
-        var statusRowStyle = new RowStyle(SizeType.Absolute, 0);
-        root.RowStyles.Add(statusRowStyle);
         var navigationRow = new RowStyle(SizeType.Absolute, UiMetrics.Px(this, 40));
         root.RowStyles.Add(navigationRow);
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.Controls.Add(BuildHeader(headerRow), 0, 0);
-        root.Controls.Add(BuildNavigation(navigationRow), 0, 2);
-        var statusRow = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Background, Margin = Padding.Empty };
-        statusLabel.Dock = DockStyle.Fill;
-        // Fill is added first so the Left-docked spinner claims its edge before the label fills the rest.
-        statusRow.Controls.Add(statusLabel);
-        statusRow.Controls.Add(statusSpinner);
-        root.Controls.Add(statusRow, 0, 1);
-        root.Controls.Add(BuildPages(), 0, 3);
-        void ResizeStatusRow()
-        {
-            var show = !string.IsNullOrWhiteSpace(statusLabel.Text);
-            var height = show ? NativePageStyle.TextHeight(statusLabel, statusLabel.Font, verticalPadding: UiMetrics.ControlGap) : 0;
-            if (Math.Abs(statusRowStyle.Height - height) >= .5f) statusRowStyle.Height = height;
-            statusRow.Visible = show;
-        }
-        statusLabel.TextChanged += (_, _) => ResizeStatusRow();
-        statusLabel.FontChanged += (_, _) => ResizeStatusRow();
-        root.DpiChangedAfterParent += (_, _) => ResizeStatusRow();
-        root.Layout += (_, _) => ResizeStatusRow();
+        root.Controls.Add(BuildNavigation(navigationRow), 0, 1);
+        root.Controls.Add(BuildPages(), 0, 2);
         Controls.Add(root);
-        ResizeStatusRow();
     }
 
     private Control BuildHeader(RowStyle row)
     {
         var header = new Panel { Dock = DockStyle.Fill, BackColor = Theme.Background, Margin = Padding.Empty };
         var title = NativePageStyle.Label("STORE  /  今日のラインナップ", NativePageStyle.Heading);
+        var statusRow = new Panel { BackColor = Theme.Background, Margin = Padding.Empty, AccessibleName = "STORE の状態" };
+        statusLabel.Dock = DockStyle.Fill;
+        statusLabel.AutoSize = false;
+        statusLabel.AutoEllipsis = true;
+        statusRow.Controls.Add(statusLabel);
+        statusRow.Controls.Add(statusSpinner);
         var counts = new RoundedCard { Margin = Padding.Empty, Padding = Padding.Empty, AccessibleName = "カタログの収録件数" };
         var blocks = new[] { CountBlock(skinCountLabel, "武器スキン"), CountBlock(chromaCountLabel, "カラー"), CountBlock(videoCountLabel, "動画") };
         counts.Controls.AddRange(blocks);
-        header.Controls.Add(title); header.Controls.Add(counts);
+        header.Controls.Add(title); header.Controls.Add(statusRow); header.Controls.Add(counts);
         void Place()
         {
             var s = new Func<int, int>(value => UiMetrics.Px(header, value));
@@ -415,9 +404,17 @@ public sealed class StorePreviewControl : UserControl
                 blocks[i].Bounds = new Rectangle(left, inset, right - left, blockHeight);
             }
             var titleHeight = NativePageStyle.TextHeight(header, title.Font, verticalPadding: UiMetrics.ControlGap);
-            title.Bounds = new Rectangle(0, Math.Max(0, (header.ClientSize.Height - titleHeight) / 2), Math.Max(0, header.ClientSize.Width - counts.Width - s(UiMetrics.ContentGap)), titleHeight);
+            var leftWidth = Math.Max(0, header.ClientSize.Width - counts.Width - s(UiMetrics.ContentGap));
+            var showStatus = !string.IsNullOrWhiteSpace(statusLabel.Text);
+            var statusHeight = NativePageStyle.TextHeight(header, statusLabel.Font, verticalPadding: 0);
+            var top = Math.Max(0, (cardHeight - titleHeight - statusHeight) / 2);
+            title.Bounds = new Rectangle(0, top, leftWidth, titleHeight);
+            statusRow.Bounds = new Rectangle(0, top + titleHeight, leftWidth, statusHeight);
+            statusRow.Visible = showStatus;
         }
         header.Resize += (_, _) => Place();
+        statusLabel.TextChanged += (_, _) => { mediaToolTips.SetToolTip(statusLabel, statusLabel.Text); Place(); };
+        statusLabel.FontChanged += (_, _) => Place();
         Place();
         return header;
     }
@@ -946,7 +943,6 @@ public sealed class StorePreviewControl : UserControl
             storefront = null;
             RenderStorefront();
             UpdateAccountState();
-            SetStatus("先にRiotアカウントへ接続してください。", true);
             return;
         }
         if (loadingStore || IsDisposed) return;
@@ -2063,6 +2059,7 @@ public sealed class StorePreviewControl : UserControl
         // Disposing: the Disposed handler runs after child controls are already torn down.
         if (IsDisposed || Disposing || statusLabel.IsDisposed) return;
         statusLabel.Text = message;
+        statusLabel.AccessibleDescription = message;
         statusLabel.ForeColor = error ? Theme.Red : Theme.Muted;
     }
 
